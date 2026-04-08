@@ -17,3 +17,5 @@ jobs:
         run: bash download_data.sh
       - name: Build and test
         run: fpm test --compiler gfortran --flag "-ffree-line-length-none"
+      - name: Run apps
+        run: fpm run --compiler gfortran --flag "-ffree-line-length-none" compute_from_scratch generate_observations sun_ekf_kepler
