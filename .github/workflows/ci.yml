@@ -1,0 +1,19 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install fpm
+        uses: fortran-lang/setup-fpm@v9
+        with:
+          fpm-version: v0.12.0
+      - name: Download data files
+        run: bash download_data.sh
+      - name: Build and test
+        run: fpm test --compiler gfortran --flag "-ffree-line-length-none"
