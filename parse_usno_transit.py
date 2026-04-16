@@ -1,3 +1,10 @@
+"""
+Data from https://ssd.jpl.nasa.gov/planets/obs_data.html
+
+USNO 6″, 1913-76
+https://ssd.jpl.nasa.gov/dat/planets/trnstswash6a.txt
+"""
+
 import re
 from datetime import timedelta
 import csv
