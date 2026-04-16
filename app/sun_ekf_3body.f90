@@ -680,7 +680,7 @@ program sun_ekf_3body
   x_init(12) = x_true(12) + 1.0_dp * DEG2RAD    ! M0_M: +1 deg
   x_init(13) = x_true(13) * 1.001_dp             ! mu_EM: +0.1%
   x_init(14) = x_true(14) * 1.005_dp              ! a_M: +0.5%
-  x_init(15) = x_true(15) * 2.0_dp               ! gm_M: fixed at 2× truth
+  x_init(15) = x_true(15) * 2.0_dp               ! gm_M: 2× truth
 
   print '(/,A)', '  Perturbed initial guess:'
   print '(A)', '  ── Earth ──'
@@ -751,8 +751,11 @@ program sun_ekf_3body
   do iter = 1, N_ITER
 
   ! Use constant large sigma to prevent nonlinear overshooting.
-  ! The iterated EKF refines via re-linearization, not via tighter sigma.
-  sigma_obs = 5.0_dp   ! 5 degrees — large enough to prevent overcorrection
+  ! sigma=5 deg — large to prevent nonlinear EKF overshooting.
+  ! Sequential EKF diverges with tight sigma even for tiny perturbations
+  ! because per-observation updates overcorrect in 15-D parameter space.
+  ! Batch least-squares needed to exploit the actual 1" transit precision.
+  sigma_obs = 5.0_dp
 
   print '(/,A,I2,A,I2)', '  ══════ Iteration ', iter, ' / ', N_ITER
   flush(6)
@@ -785,7 +788,7 @@ program sun_ekf_3body
   P_cov(13,13) = (0.005_dp * mu_em)**2      ! sigma_mu_em = 0.5%
   P_cov(14,14) = (0.01_dp * a_m_comp)**2    ! sigma_a_M = 1%
   ! GM_moon
-  P_cov(15,15) = (0.5_dp * GM_MOON)**2      ! sigma_gm_moon = 50% (initial guess is 2× off)
+  P_cov(15,15) = (0.5_dp * GM_MOON)**2      ! sigma_gm_moon = 50%
 
   active = .true.
   ! GM_moon is estimated — geocentric RA/Dec constrains it through
