@@ -138,13 +138,64 @@ def parse_file_to_csv(input_file: str, output_csv: str = None):
     return records
 
 
+def print_summary(records):
+    """Print planet code legend, column descriptions, and observation counts."""
+    # Planet codes: "00p" format where p is the planet number
+    PLANET_NAMES = {
+        '001': 'Mercury',
+        '002': 'Venus',
+        '003': 'Sun',
+        '004': 'Mars',
+        '005': 'Jupiter',
+        '006': 'Saturn',
+        '007': 'Uranus',
+        '008': 'Neptune',
+        '009': 'Pluto',
+        '010': 'Moon',
+    }
+
+    from collections import Counter
+    counts = Counter(r['planet_code'] for r in records)
+
+    print("\n" + "=" * 70)
+    print("PLANET CODES")
+    print("=" * 70)
+    for code in sorted(counts):
+        name = PLANET_NAMES.get(code, 'Unknown')
+        print(f"  {code}  {name:<10s}  {counts[code]:>6,} observations")
+    print(f"  {'':3s}  {'TOTAL':<10s}  {len(records):>6,} observations")
+
+    print("\n" + "=" * 70)
+    print("CSV COLUMN DESCRIPTIONS")
+    print("  Source: O'Handley (1968), JPL Technical Report 32-1296")
+    print("  Format: https://ssd.jpl.nasa.gov/dat/planets/optical_format.txt")
+    print("=" * 70)
+    columns = [
+        ("planet_code",  "Planet number (cols 2-4): 001=Mercury .. 010=Moon"),
+        ("jd",           "Julian Date of observation (cols 5-16, stored as JD×10^5)"),
+        ("date_utc",     "Calendar date/time converted from JD"),
+        ("observatory",  "Observatory/telescope code (cols 22-25): 7866=USNO 6-inch"),
+        ("obs_type",     "Observation type (col 29): 1=transit geocentric, "
+                         "3=photo geocentric, 4=transit topocentric, 6=photo topocentric"),
+        ("ra_deg",       "Right ascension in degrees (cols 34-42: hhmmss.sss)"),
+        ("dec_deg",      "Declination in degrees (cols 51-59: ±ddmmss.ss)"),
+        ("ra_equinox",   "RA equinox (col 43): 0=true equator & equinox, "
+                         "3=mean 1950, 9=mean J2000"),
+        ("dec_equinox",  "Dec equinox (col 60): same codes as ra_equinox"),
+        ("ra_residual",  "RA residual in arcsec (cols 44-49, usually blank)"),
+        ("dec_residual", "Dec residual in arcsec (cols 61-65, usually blank)"),
+        ("year",         "Year of observation (cols 73-76)"),
+        ("source",       "Source identifier (cols 77-80)"),
+        ("latitude_deg", "Observatory latitude (°N), fixed for USNO Washington"),
+        ("longitude_deg","Observatory longitude (°E), fixed for USNO Washington"),
+    ]
+    for name, desc in columns:
+        print(f"  {name:<15s}  {desc}")
+    print()
+
+
 # ====================== EXAMPLE USAGE ======================
 if __name__ == "__main__":
     filename = "trnstswash6a.txt"
     records = parse_file_to_csv(filename)
-
-    for rec in records[:3]:
-        print(rec)
-        print(f"→ Planet {rec['planet_code']}, {rec['date_utc']}, "
-              f"RA {rec['ra_deg']:.4f}°, Dec {rec['dec_deg']:.4f}°")
-        print("-" * 80)
+    print_summary(records)
