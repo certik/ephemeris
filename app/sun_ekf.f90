@@ -497,8 +497,8 @@ program sun_ekf
     if (obs_all(i)%body == 1) then
       n_sun = n_sun + 1
       s_jd(n_sun)  = obs_all(i)%jd
-      s_alt(n_sun) = obs_all(i)%alt_obs
-      s_az(n_sun)  = obs_all(i)%az_obs
+      s_alt(n_sun) = obs_all(i)%ra_deg
+      s_az(n_sun)  = obs_all(i)%dec_deg
     end if
   end do
   print '(A,I6,A)', '  Loaded ', n_sun, ' Sun observations'

@@ -911,8 +911,8 @@ program kalman_sim
 
     call predict_altaz(x_prop, obs(i)%jd, lat_deg, lon_deg, obs(i)%body, &
                        alt_test, az_test)
-    dalt = alt_test - obs(i)%alt_true
-    daz  = az_test  - obs(i)%az_true
+    dalt = alt_test - obs(i)%ra_deg
+    daz  = az_test  - obs(i)%dec_deg
     if (daz > 180.0_dp)  daz = daz - 360.0_dp
     if (daz < -180.0_dp) daz = daz + 360.0_dp
     if (i <= 8 .or. (i <= 100 .and. mod(i,25)==0)) then

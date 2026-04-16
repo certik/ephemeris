@@ -368,12 +368,11 @@ contains
   end function
 
   ! ── Predict alt/az for Sun or Moon from 12-param state ──
-  subroutine predict_altaz(x, t_epoch, jd_obs, &
-                            lat_deg, lon_deg, body_code, alt_deg, az_deg)
+  subroutine predict_radec(x, t_epoch, jd_obs, body_code, ra_deg, dec_deg)
     real(dp), intent(in)  :: x(NS)
-    real(dp), intent(in)  :: t_epoch, jd_obs, lat_deg, lon_deg
+    real(dp), intent(in)  :: t_epoch, jd_obs
     integer,  intent(in)  :: body_code   ! 1=Sun, 2=Moon
-    real(dp), intent(out) :: alt_deg, az_deg
+    real(dp), intent(out) :: ra_deg, dec_deg
 
     real(dp) :: ecc_e, inc_e, raan_e, argp_e, M0_e, mu_se, a_earth_v
     real(dp) :: ecc_m, inc_m, raan_m, argp_m, M0_m, mu_em, a_moon_v
@@ -383,15 +382,10 @@ contains
     real(dp) :: dt_s
     real(dp) :: pos_nb(NB,3), vel_nb(NB,3), gm_nb(NB)
     real(dp) :: r_target(3), v_earth(3)
-    real(dp) :: d_gcrs(3), d_date(3), d_itrs(3), d_local(3)
-    real(dp) :: obs_itrs(3), obs_date(3), obs_gcrs(3)
-    real(dp) :: lat, lon, sinlat, coslat, slon, clon
-    real(dp) :: jd_whole, jd_frac, jd_tdb
-    real(dp) :: gmst_h_v, gast_h_v, gast_rad, sg, cg
+    real(dp) :: d_gcrs(3), d_date(3)
+    real(dp) :: jd_tdb
     real(dp) :: M_mat(3,3)
-    real(dp) :: dpsi_n, deps_n, mean_ob_n
     real(dp) :: d_unit(3), v_obs(3), vdot, dnorm
-    real(dp) :: north, east, up, tmp
 
     ! ═══ Unpack state ═══
     ecc_e  = x(1);  inc_e  = x(2);  raan_e = x(3)
@@ -405,15 +399,12 @@ contains
     gm_sun_v   = mu_se - gm_earth_v
 
     ! ═══ Elements → Cartesian at epoch ═══
-    ! Earth relative to Sun (from Earth Keplerian elements)
     call kepler_to_cart(a_earth_v, ecc_e, inc_e, raan_e, argp_e, M0_e, &
                         mu_se, r_es, v_es)
-    ! Moon relative to Earth (from Moon Keplerian elements)
     call kepler_to_cart(a_moon_v, ecc_m, inc_m, raan_m, argp_m, M0_m, &
                         mu_em, r_me, v_me)
 
     ! ═══ 3-body initial conditions (barycentric frame) ═══
-    ! In Sun-centered frame: Sun=0, Earth=r_es, Moon=r_es+r_me
     M_tot = gm_sun_v + gm_earth_v + gm_moon_v
     r_bary = (gm_earth_v * r_es + gm_moon_v * (r_es + r_me)) / M_tot
     v_bary = (gm_earth_v * v_es + gm_moon_v * (v_es + v_me)) / M_tot
@@ -441,36 +432,8 @@ contains
     end if
     v_earth = vel_nb(2,:)
 
-    ! ═══ Coordinate transforms ═══
-    lat = lat_deg * DEG2RAD
-    lon = lon_deg * DEG2RAD
-    sinlat = sin(lat); coslat = cos(lat)
-    slon = sin(lon); clon = cos(lon)
-
-    jd_whole = floor(jd_obs + 0.5_dp)
-    jd_frac  = jd_obs - jd_whole
-    jd_tdb = jd_obs + 69.184_dp / DAY_S
-
-    gmst_h_v = gmst_hours(jd_whole, jd_frac, jd_tdb)
-    M_mat = compute_NPB(jd_tdb)
-    call simple_nutation(jd_tdb, dpsi_n, deps_n, mean_ob_n)
-    gast_h_v = gast_from_gmst(gmst_h_v, dpsi_n, mean_ob_n, jd_tdb)
-    gast_rad = gast_h_v * TAU / 24.0_dp
-    sg = sin(gast_rad); cg = cos(gast_rad)
-
-    ! Observer ITRS position
-    obs_itrs(1) = R_EARTH_KM * coslat * clon
-    obs_itrs(2) = R_EARTH_KM * coslat * slon
-    obs_itrs(3) = R_EARTH_KM * sinlat
-
-    ! Observer in GCRS
-    obs_date(1) =  cg*obs_itrs(1) - sg*obs_itrs(2)
-    obs_date(2) =  sg*obs_itrs(1) + cg*obs_itrs(2)
-    obs_date(3) = obs_itrs(3)
-    obs_gcrs = matmul(transpose(M_mat), obs_date)
-
-    ! Direction in GCRS
-    d_gcrs = r_target - obs_gcrs
+    ! ═══ Geocentric direction in GCRS ═══
+    d_gcrs = r_target
 
     ! Aberration (first-order)
     v_obs = v_earth / C_LIGHT_KMS
@@ -481,33 +444,20 @@ contains
       d_gcrs = d_gcrs + dnorm * (v_obs - d_unit * vdot)
     end if
 
-    ! GCRS → true equator of date
+    ! GCRS → true equator of date (apparent place)
+    jd_tdb = jd_obs + 69.184_dp / DAY_S
+    M_mat = compute_NPB(jd_tdb)
     d_date = matmul(M_mat, d_gcrs)
 
-    ! True equator of date → ITRS
-    d_itrs(1) =  cg*d_date(1) + sg*d_date(2)
-    d_itrs(2) = -sg*d_date(1) + cg*d_date(2)
-    d_itrs(3) = d_date(3)
-
-    ! Rotate to local meridian
-    tmp        =  clon*d_itrs(1) + slon*d_itrs(2)
-    d_local(2) = -slon*d_itrs(1) + clon*d_itrs(2)
-    d_local(1) = tmp
-    d_local(3) = d_itrs(3)
-
-    ! Horizon coordinates
-    up    = coslat*d_local(1) + sinlat*d_local(3)
-    north = -sinlat*d_local(1) + coslat*d_local(3)
-    east  = d_local(2)
-
-    dnorm = sqrt(north**2 + east**2 + up**2)
+    ! Extract RA/Dec from apparent direction
+    dnorm = sqrt(sum(d_date**2))
     if (dnorm < 1.0d-10) then
-      alt_deg = 0.0_dp; az_deg = 0.0_dp; return
+      ra_deg = 0.0_dp; dec_deg = 0.0_dp; return
     end if
 
-    alt_deg = asin(up / dnorm) * RAD2DEG
-    az_deg  = atan2(east, north) * RAD2DEG
-    if (az_deg < 0.0_dp) az_deg = az_deg + 360.0_dp
+    dec_deg = asin(d_date(3) / dnorm) * RAD2DEG
+    ra_deg  = atan2(d_date(2), d_date(1)) * RAD2DEG
+    if (ra_deg < 0.0_dp) ra_deg = ra_deg + 360.0_dp
   end subroutine
 
 end module kepler_obs_3body_mod
@@ -533,7 +483,7 @@ program sun_ekf_3body
 
   ! EKF covariance
   real(dp) :: P_cov(NS,NS)
-  real(dp) :: Q_noise(NS,NS), R_noise(2,2)
+  real(dp) :: Q_noise(NS,NS)
 
   ! SPK kernel
   type(spk_kernel) :: kernel
@@ -541,11 +491,11 @@ program sun_ekf_3body
   ! Observations
   type(observation) :: obs_all(MAX_OBS)
   integer :: n_obs_all, n_sun, n_moon, n_all
-  real(dp) :: s_jd(MAX_OBS), s_alt(MAX_OBS), s_az(MAX_OBS)
-  real(dp) :: m_jd(MAX_OBS), m_alt(MAX_OBS), m_az(MAX_OBS)
+  real(dp) :: s_jd(MAX_OBS), s_ra(MAX_OBS), s_dec(MAX_OBS)
+  real(dp) :: m_jd(MAX_OBS), m_ra(MAX_OBS), m_dec(MAX_OBS)
   integer :: s_body(MAX_OBS), m_body(MAX_OBS)
-  ! Merged arrays for stage 3
-  real(dp) :: all_jd(MAX_OBS), all_alt(MAX_OBS), all_az(MAX_OBS)
+  ! Merged arrays for joint fit
+  real(dp) :: all_jd(MAX_OBS), all_ra(MAX_OBS), all_dec(MAX_OBS)
   integer :: all_body(MAX_OBS)
 
   ! DE440s positions
@@ -567,7 +517,7 @@ program sun_ekf_3body
 
   ! Loop/misc
   integer :: i, j
-  real(dp) :: lat_obs, lon_obs, jd_epoch, jd_w, jd_f
+  real(dp) :: jd_epoch, jd_w, jd_f
   real(dp) :: sigma_obs
   real(dp) :: delta(NS)
   real(dp) :: err_deg
@@ -579,15 +529,11 @@ program sun_ekf_3body
   character(len=7) :: param_names(NS)
   real(dp) :: Q_rate(NS)   ! process noise rate (state²/day)
   integer :: iter
-  integer, parameter :: N_ITER = 20   ! outer iterations
+  integer, parameter :: N_ITER = 5    ! outer iterations
 
   ! ═══════════════════════════════════════════════════
-  lat_obs = 40.0_dp
-  lon_obs = 0.0_dp
-
   print '(A)', '════════════════════════════════════════════════════════'
-  print '(A)', '  3-Body Sun-Earth-Moon EKF'
-  print '(A,F8.4,A,F8.4)', '  Observer: lat=', lat_obs, ' lon=', lon_obs
+  print '(A)', '  3-Body Sun-Earth-Moon EKF (RA/Dec transit observations)'
   print '(A)', '════════════════════════════════════════════════════════'
   print '(A)', ''
   print '(A)', '  State vector (15 parameters):'
@@ -611,20 +557,20 @@ program sun_ekf_3body
   print '(A)', '    gm_M  = GM_moon (km^3/s^2)'
 
   ! ── 1. Read observations, split by body ──
-  call read_observations('observations.dat', obs_all, n_obs_all, 1.0d10)
+  call read_observations('transit_observations.dat', obs_all, n_obs_all, 1.0d10)
   n_sun = 0; n_moon = 0
   do i = 1, n_obs_all
     if (obs_all(i)%body == 1) then
       n_sun = n_sun + 1
       s_jd(n_sun)  = obs_all(i)%jd
-      s_alt(n_sun) = obs_all(i)%alt_obs
-      s_az(n_sun)  = obs_all(i)%az_obs
+      s_ra(n_sun)  = obs_all(i)%ra_deg
+      s_dec(n_sun) = obs_all(i)%dec_deg
       s_body(n_sun) = 1
     else
       n_moon = n_moon + 1
       m_jd(n_moon)  = obs_all(i)%jd
-      m_alt(n_moon) = obs_all(i)%alt_obs
-      m_az(n_moon)  = obs_all(i)%az_obs
+      m_ra(n_moon)  = obs_all(i)%ra_deg
+      m_dec(n_moon) = obs_all(i)%dec_deg
       m_body(n_moon) = 2
     end if
   end do
@@ -633,8 +579,8 @@ program sun_ekf_3body
   do i = 1, n_obs_all
     n_all = n_all + 1
     all_jd(n_all)   = obs_all(i)%jd
-    all_alt(n_all)  = obs_all(i)%alt_obs
-    all_az(n_all)   = obs_all(i)%az_obs
+    all_ra(n_all)    = obs_all(i)%ra_deg
+    all_dec(n_all)   = obs_all(i)%dec_deg
     all_body(n_all) = obs_all(i)%body
   end do
   print '(A,I6,A,I6,A)', '  Loaded ', n_sun, ' Sun +', n_moon, ' Moon observations'
@@ -720,20 +666,20 @@ program sun_ekf_3body
   print '(A,ES20.12,A)',  '    gm_M  = ', x_true(15), ' km^3/s^2'
 
   ! ── 5. Perturbed initial state ──
-  x_init(1)  = x_true(1)  * 1.20_dp            ! e_E: +20%
-  x_init(2)  = x_true(2)  + 2.0_dp * DEG2RAD   ! i_E: +2 deg
-  x_init(3)  = x_true(3)  + 5.0_dp * DEG2RAD   ! Om_E: +5 deg
-  x_init(4)  = x_true(4)  + 5.0_dp * DEG2RAD   ! w_E: +5 deg
-  x_init(5)  = x_true(5)  + 3.0_dp * DEG2RAD   ! M0_E: +3 deg
-  x_init(6)  = x_true(6)  * 1.005_dp            ! mu_SE: +0.5%
-  x_init(7)  = x_true(7)  * 1.01_dp             ! a_E: +1%
-  x_init(8)  = x_true(8)  * 1.20_dp             ! e_M: +20%
-  x_init(9)  = x_true(9)  + 2.0_dp * DEG2RAD    ! i_M: +2 deg
-  x_init(10) = x_true(10) + 5.0_dp * DEG2RAD    ! Om_M: +5 deg
-  x_init(11) = x_true(11) + 5.0_dp * DEG2RAD    ! w_M: +5 deg
-  x_init(12) = x_true(12) + 3.0_dp * DEG2RAD    ! M0_M: +3 deg
-  x_init(13) = x_true(13) * 1.005_dp             ! mu_EM: +0.5%
-  x_init(14) = x_true(14) * 1.01_dp              ! a_M: +1%
+  x_init(1)  = x_true(1)  * 1.05_dp            ! e_E: +5%
+  x_init(2)  = x_true(2)  + 0.5_dp * DEG2RAD   ! i_E: +0.5 deg
+  x_init(3)  = x_true(3)  + 1.0_dp * DEG2RAD   ! Om_E: +1 deg
+  x_init(4)  = x_true(4)  + 1.0_dp * DEG2RAD   ! w_E: +1 deg
+  x_init(5)  = x_true(5)  + 1.0_dp * DEG2RAD   ! M0_E: +1 deg
+  x_init(6)  = x_true(6)  * 1.001_dp            ! mu_SE: +0.1%
+  x_init(7)  = x_true(7)  * 1.005_dp            ! a_E: +0.5%
+  x_init(8)  = x_true(8)  * 1.05_dp             ! e_M: +5%
+  x_init(9)  = x_true(9)  + 0.5_dp * DEG2RAD    ! i_M: +0.5 deg
+  x_init(10) = x_true(10) + 1.0_dp * DEG2RAD    ! Om_M: +1 deg
+  x_init(11) = x_true(11) + 1.0_dp * DEG2RAD    ! w_M: +1 deg
+  x_init(12) = x_true(12) + 1.0_dp * DEG2RAD    ! M0_M: +1 deg
+  x_init(13) = x_true(13) * 1.001_dp             ! mu_EM: +0.1%
+  x_init(14) = x_true(14) * 1.005_dp              ! a_M: +0.5%
   x_init(15) = x_true(15) * 2.0_dp               ! gm_M: fixed at 2× truth
 
   print '(/,A)', '  Perturbed initial guess:'
@@ -784,11 +730,6 @@ program sun_ekf_3body
 
   Q_noise = 0.0_dp   ! will be set per step from Q_rate * dt
 
-  sigma_obs = 1.0_dp / 3600.0_dp   ! 1 arcsec (near-exact observations)
-  R_noise = 0.0_dp
-  R_noise(1,1) = sigma_obs**2
-  R_noise(2,2) = sigma_obs**2
-
   ! FD perturbation sizes
   ! Earth: 1e-7 (far away, standard)
   delta(1) = 1.0d-7;  delta(2) = 1.0d-7;  delta(3) = 1.0d-7
@@ -805,11 +746,16 @@ program sun_ekf_3body
   ! Outer iteration loop: re-run all 3 stages using
   ! previous final estimate as starting point.
   ! ═══════════════════════════════════════════════════
-  grid_active = .true.
+  grid_active = .false.   ! no parallax info in geocentric RA/Dec
   a_E_prev_shift = huge(1.0_dp)
   do iter = 1, N_ITER
 
+  ! Use constant large sigma to prevent nonlinear overshooting.
+  ! The iterated EKF refines via re-linearization, not via tighter sigma.
+  sigma_obs = 5.0_dp   ! 5 degrees — large enough to prevent overcorrection
+
   print '(/,A,I2,A,I2)', '  ══════ Iteration ', iter, ' / ', N_ITER
+  flush(6)
 
   ! On iteration > 1, use previous result as starting point
   if (iter > 1) then
@@ -823,29 +769,30 @@ program sun_ekf_3body
   ! ══════════════════════════════════════════════════════════════════════
   P_cov = 0.0_dp
   ! Earth orbit
-  P_cov(1,1) = (0.005_dp)**2               ! sigma_e = 0.005
-  P_cov(2,2) = (3.0_dp * DEG2RAD)**2       ! sigma_i = 3 deg
-  P_cov(3,3) = (8.0_dp * DEG2RAD)**2       ! sigma_Omega = 8 deg
-  P_cov(4,4) = (8.0_dp * DEG2RAD)**2       ! sigma_omega = 8 deg
-  P_cov(5,5) = (5.0_dp * DEG2RAD)**2       ! sigma_M0 = 5 deg
-  P_cov(6,6) = (0.20_dp * mu_se)**2        ! sigma_mu = 20%
-  P_cov(7,7) = (0.20_dp * a_comp)**2       ! sigma_a_E = 20%
+  P_cov(1,1) = (0.002_dp)**2               ! sigma_e = 0.002
+  P_cov(2,2) = (1.0_dp * DEG2RAD)**2       ! sigma_i = 1 deg
+  P_cov(3,3) = (2.0_dp * DEG2RAD)**2       ! sigma_Omega = 2 deg
+  P_cov(4,4) = (2.0_dp * DEG2RAD)**2       ! sigma_omega = 2 deg
+  P_cov(5,5) = (2.0_dp * DEG2RAD)**2       ! sigma_M0 = 2 deg
+  P_cov(6,6) = (0.005_dp * mu_se)**2       ! sigma_mu = 0.5%
+  P_cov(7,7) = (0.01_dp * a_comp)**2       ! sigma_a_E = 1%
   ! Moon orbit
-  P_cov(8,8)   = (0.02_dp)**2              ! sigma_e_m = 0.02
-  P_cov(9,9)   = (5.0_dp * DEG2RAD)**2     ! sigma_i_m = 5 deg
-  P_cov(10,10) = (10.0_dp * DEG2RAD)**2    ! sigma_Om_m = 10 deg
-  P_cov(11,11) = (10.0_dp * DEG2RAD)**2    ! sigma_w_m = 10 deg
-  P_cov(12,12) = (5.0_dp * DEG2RAD)**2     ! sigma_M0_m = 5 deg
-  P_cov(13,13) = (0.20_dp * mu_em)**2      ! sigma_mu_em = 20%
-  P_cov(14,14) = (0.20_dp * a_m_comp)**2   ! sigma_a_M = 20%
+  P_cov(8,8)   = (0.005_dp)**2              ! sigma_e_m = 0.005
+  P_cov(9,9)   = (1.0_dp * DEG2RAD)**2      ! sigma_i_m = 1 deg
+  P_cov(10,10) = (2.0_dp * DEG2RAD)**2      ! sigma_Om_m = 2 deg
+  P_cov(11,11) = (2.0_dp * DEG2RAD)**2      ! sigma_w_m = 2 deg
+  P_cov(12,12) = (2.0_dp * DEG2RAD)**2      ! sigma_M0_m = 2 deg
+  P_cov(13,13) = (0.005_dp * mu_em)**2      ! sigma_mu_em = 0.5%
+  P_cov(14,14) = (0.01_dp * a_m_comp)**2    ! sigma_a_M = 1%
   ! GM_moon
-  P_cov(15,15) = (0.01_dp * GM_MOON)**2     ! sigma_gm_moon = 1%
+  P_cov(15,15) = (0.5_dp * GM_MOON)**2      ! sigma_gm_moon = 50% (initial guess is 2× off)
 
   active = .true.
-  active(15) = .false.   ! fix GM_moon — test observability
+  ! GM_moon is estimated — geocentric RA/Dec constrains it through
+  ! the Earth-Moon mass ratio's effect on the barycenter offset
 
-  call run_ekf_pass(x, P_cov, n_all, all_jd, all_alt, all_az, all_body, active, &
-                    'Joint fit: all observations, all parameters')
+  call run_ekf_pass(x, P_cov, n_all, all_jd, all_ra, all_dec, all_body, active, &
+                    'Joint fit: all observations, all parameters', sigma_obs)
 
   ! ── Post-EKF: 1D grid search along the n=const degenerate direction ──
   ! The EKF determines n = sqrt(mu/a^3) precisely but cannot resolve
@@ -855,7 +802,7 @@ program sun_ekf_3body
   ! or when the shift oscillates (noise-dominated regime).
   if (grid_active) then
     a_E_before = x(7)
-    call grid_search_degenerate(x, n_all, all_jd, all_alt, all_az, all_body)
+    call grid_search_degenerate(x, n_all, all_jd, all_ra, all_dec, all_body)
     a_E_shift = abs(x(7) - a_E_before) / x_true(7) * 100.0_dp
 
     if (a_E_shift < 2.0_dp) then
@@ -1088,22 +1035,24 @@ program sun_ekf_3body
 contains
 
   ! ── Generic EKF pass subroutine ──
-  subroutine run_ekf_pass(xv, Pv, n_obs, obs_jds, obs_alts, obs_azs, &
-                           obs_bodies, act, stage_name)
+  subroutine run_ekf_pass(xv, Pv, n_obs, obs_jds, obs_ras, obs_decs, &
+                           obs_bodies, act, stage_name, sigma_pass)
     real(dp), intent(inout) :: xv(NS), Pv(NS,NS)
     integer, intent(in) :: n_obs
-    real(dp), intent(in) :: obs_jds(n_obs), obs_alts(n_obs), obs_azs(n_obs)
+    real(dp), intent(in) :: obs_jds(n_obs), obs_ras(n_obs), obs_decs(n_obs)
     integer, intent(in) :: obs_bodies(n_obs)
     logical, intent(in) :: act(NS)
     character(len=*), intent(in) :: stage_name
+    real(dp), intent(in) :: sigma_pass   ! measurement sigma in degrees
 
     real(dp) :: P_pred(NS,NS), H(2,NS)
     real(dp) :: PHt(NS,2), S_mat(2,2), S_inv(2,2), K_gain(NS,2)
     real(dp) :: KH(NS,NS), I_KH(NS,NS), I_id(NS,NS)
     real(dp) :: zz_obs(2), zz_pred(2), innov(2)
-    real(dp) :: alt_pred, az_pred, alt_p, az_p
+    real(dp) :: R_pass(2,2)
+    real(dp) :: ra_pred, dec_pred, ra_p, dec_p
     real(dp) :: xp(NS), det_S
-    real(dp) :: win_a, win_z
+    real(dp) :: win_ra, win_dec
     integer :: kk, jj, n_proc
     real(dp) :: jd_prev, dt_days, Q_step(NS,NS)
 
@@ -1112,13 +1061,19 @@ contains
       I_id(kk,kk) = 1.0_dp
     end do
 
-    win_a = 0.0_dp; win_z = 0.0_dp
+    R_pass = 0.0_dp
+    R_pass(1,1) = sigma_pass**2
+    R_pass(2,2) = sigma_pass**2
+
+    win_ra = 0.0_dp; win_dec = 0.0_dp
     n_proc = 0
     jd_prev = obs_jds(1)
 
-    print '(/,A,A)', '  ', trim(stage_name)
+    print '(/,A,A,A,F10.1,A)', '  ', trim(stage_name), &
+         '  (sigma=', sigma_pass*3600.0_dp, '")'
     print '(A)', '  ──────────────────────────────────────────────────────────────────────────'
-    print '(A)', '   Obs#  winRMS_a" winRMS_z"  e_E_err%  muSE_err%  aE_err%   e_M_err%  muEM_err%  aM_err%  gmM_err%'
+    print '(A)', '   Obs# winRMS_RA" winRMS_D"  e_E_err%  muSE_err%  aE_err%   e_M_err%  muEM_err%  aM_err%  gmM_err%'
+    flush(6)
 
     do kk = 1, n_obs
       ! Time-dependent process noise
@@ -1131,16 +1086,16 @@ contains
       P_pred = Pv + Q_step
       jd_prev = obs_jds(kk)
 
-      call predict_altaz(xv, t_epoch, obs_jds(kk), &
-                          lat_obs, lon_obs, obs_bodies(kk), alt_pred, az_pred)
+      call predict_radec(xv, t_epoch, obs_jds(kk), &
+                          obs_bodies(kk), ra_pred, dec_pred)
 
       ! Skip if prediction is NaN (bad state)
-      if (alt_pred /= alt_pred .or. az_pred /= az_pred) cycle
+      if (ra_pred /= ra_pred .or. dec_pred /= dec_pred) cycle
 
-      innov(1) = obs_alts(kk) - alt_pred
-      innov(2) = obs_azs(kk)  - az_pred
-      if (innov(2) >  180.0_dp) innov(2) = innov(2) - 360.0_dp
-      if (innov(2) < -180.0_dp) innov(2) = innov(2) + 360.0_dp
+      innov(1) = obs_ras(kk) - ra_pred
+      innov(2) = obs_decs(kk) - dec_pred
+      if (innov(1) >  180.0_dp) innov(1) = innov(1) - 360.0_dp
+      if (innov(1) < -180.0_dp) innov(1) = innov(1) + 360.0_dp
 
       ! Innovation gating: skip if residual > 30 deg (wildly wrong)
       if (abs(innov(1)) > 30.0_dp .or. abs(innov(2)) > 30.0_dp) cycle
@@ -1151,20 +1106,20 @@ contains
         if (.not. act(jj)) cycle
         xp = xv
         xp(jj) = xp(jj) + delta(jj)
-        call predict_altaz(xp, t_epoch, obs_jds(kk), &
-                            lat_obs, lon_obs, obs_bodies(kk), alt_p, az_p)
-        if (alt_p /= alt_p .or. az_p /= az_p) then
+        call predict_radec(xp, t_epoch, obs_jds(kk), &
+                            obs_bodies(kk), ra_p, dec_p)
+        if (ra_p /= ra_p .or. dec_p /= dec_p) then
           H(1,jj) = 0.0_dp; H(2,jj) = 0.0_dp; cycle
         end if
-        H(1,jj) = (alt_p - alt_pred) / delta(jj)
-        H(2,jj) = (az_p  - az_pred)  / delta(jj)
-        if (H(2,jj) >  180.0_dp / delta(jj)) H(2,jj) = H(2,jj) - 360.0_dp / delta(jj)
-        if (H(2,jj) < -180.0_dp / delta(jj)) H(2,jj) = H(2,jj) + 360.0_dp / delta(jj)
+        H(1,jj) = (ra_p  - ra_pred)  / delta(jj)
+        H(2,jj) = (dec_p - dec_pred) / delta(jj)
+        if (H(1,jj) >  180.0_dp / delta(jj)) H(1,jj) = H(1,jj) - 360.0_dp / delta(jj)
+        if (H(1,jj) < -180.0_dp / delta(jj)) H(1,jj) = H(1,jj) + 360.0_dp / delta(jj)
       end do
 
       ! Innovation covariance
       PHt = matmul(P_pred, transpose(H))
-      S_mat = matmul(H, PHt) + R_noise
+      S_mat = matmul(H, PHt) + R_pass
 
       det_S = S_mat(1,1)*S_mat(2,2) - S_mat(1,2)*S_mat(2,1)
       if (abs(det_S) < 1.0d-30) cycle
@@ -1217,16 +1172,16 @@ contains
 
       ! Windowed statistics
       n_proc = n_proc + 1
-      win_a = win_a + innov(1)**2
-      win_z = win_z + innov(2)**2
+      win_ra  = win_ra  + innov(1)**2
+      win_dec = win_dec + innov(2)**2
 
       if (mod(n_proc, 200) == 0 .or. n_proc == 1 .or. n_proc == n_obs) then
         jj = min(n_proc, 200)
         if (n_proc == 1) jj = 1
         print '(I7,2F10.1,7F10.4)', &
              n_proc, &
-             sqrt(win_a / jj) * 3600.0_dp, &
-             sqrt(win_z / jj) * 3600.0_dp, &
+             sqrt(win_ra / jj) * 3600.0_dp, &
+             sqrt(win_dec / jj) * 3600.0_dp, &
              (xv(1)/x_true(1) - 1.0_dp) * 100.0_dp, &
              (xv(6)/x_true(6) - 1.0_dp) * 100.0_dp, &
              (xv(7)/x_true(7) - 1.0_dp) * 100.0_dp, &
@@ -1234,7 +1189,8 @@ contains
              (xv(13)/x_true(13) - 1.0_dp) * 100.0_dp, &
              (xv(14)/x_true(14) - 1.0_dp) * 100.0_dp, &
              (xv(15)/x_true(15) - 1.0_dp) * 100.0_dp
-        win_a = 0.0_dp; win_z = 0.0_dp
+        win_ra = 0.0_dp; win_dec = 0.0_dp
+        flush(6)
       end if
     end do
   end subroutine
@@ -1245,18 +1201,18 @@ contains
   ! minimizes Moon observation residuals. The parallactic inequality
   ! amplitude depends on a_E independently of n, so Moon observations
   ! break the mu-a degeneracy here.
-  subroutine grid_search_degenerate(xv, n_obs, obs_jds, obs_alts, obs_azs, obs_bodies)
+  subroutine grid_search_degenerate(xv, n_obs, obs_jds, obs_ras, obs_decs, obs_bodies)
     real(dp), intent(inout) :: xv(NS)
     integer, intent(in) :: n_obs
-    real(dp), intent(in) :: obs_jds(n_obs), obs_alts(n_obs), obs_azs(n_obs)
+    real(dp), intent(in) :: obs_jds(n_obs), obs_ras(n_obs), obs_decs(n_obs)
     integer, intent(in) :: obs_bodies(n_obs)
 
     integer, parameter :: N_GRID = 21
     integer, parameter :: SUBSAMPLE = 20
     real(dp) :: n_mean, a_lo, a_hi, a_step
     real(dp) :: a_trial, mu_trial, rss, rss_best, a_best, mu_best
-    real(dp) :: x_trial(NS), alt_pred, az_pred
-    real(dp) :: da, dz
+    real(dp) :: x_trial(NS), ra_pred, dec_pred
+    real(dp) :: dra, ddec
     integer :: ii, kk, n_moon
 
     ! Mean motion (invariant along the n=const curve)
@@ -1285,18 +1241,18 @@ contains
       n_moon = 0
       do kk = 1, n_obs, SUBSAMPLE
         if (obs_bodies(kk) /= 2) cycle  ! Moon only
-        call predict_altaz(x_trial, t_epoch, obs_jds(kk), &
-                            lat_obs, lon_obs, obs_bodies(kk), alt_pred, az_pred)
-        if (alt_pred /= alt_pred .or. az_pred /= az_pred) then
+        call predict_radec(x_trial, t_epoch, obs_jds(kk), &
+                            obs_bodies(kk), ra_pred, dec_pred)
+        if (ra_pred /= ra_pred .or. dec_pred /= dec_pred) then
           rss = rss + 1.0d4
           n_moon = n_moon + 1
           cycle
         end if
-        da = obs_alts(kk) - alt_pred
-        dz = obs_azs(kk) - az_pred
-        if (dz >  180.0_dp) dz = dz - 360.0_dp
-        if (dz < -180.0_dp) dz = dz + 360.0_dp
-        rss = rss + da**2 + dz**2
+        dra = obs_ras(kk) - ra_pred
+        ddec = obs_decs(kk) - dec_pred
+        if (dra >  180.0_dp) dra = dra - 360.0_dp
+        if (dra < -180.0_dp) dra = dra + 360.0_dp
+        rss = rss + dra**2 + ddec**2
         n_moon = n_moon + 1
       end do
 
@@ -1328,16 +1284,16 @@ contains
       rss = 0.0_dp
       do kk = 1, n_obs, SUBSAMPLE
         if (obs_bodies(kk) /= 2) cycle
-        call predict_altaz(x_trial, t_epoch, obs_jds(kk), &
-                            lat_obs, lon_obs, obs_bodies(kk), alt_pred, az_pred)
-        if (alt_pred /= alt_pred .or. az_pred /= az_pred) then
+        call predict_radec(x_trial, t_epoch, obs_jds(kk), &
+                            obs_bodies(kk), ra_pred, dec_pred)
+        if (ra_pred /= ra_pred .or. dec_pred /= dec_pred) then
           rss = rss + 1.0d4; cycle
         end if
-        da = obs_alts(kk) - alt_pred
-        dz = obs_azs(kk) - az_pred
-        if (dz >  180.0_dp) dz = dz - 360.0_dp
-        if (dz < -180.0_dp) dz = dz + 360.0_dp
-        rss = rss + da**2 + dz**2
+        dra = obs_ras(kk) - ra_pred
+        ddec = obs_decs(kk) - dec_pred
+        if (dra >  180.0_dp) dra = dra - 360.0_dp
+        if (dra < -180.0_dp) dra = dra + 360.0_dp
+        rss = rss + dra**2 + ddec**2
       end do
 
       if (rss < rss_best) then

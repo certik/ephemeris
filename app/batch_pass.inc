@@ -19,8 +19,8 @@
                          b_pred_alt, b_pred_az)
 
       b_m_total = b_m_total + 1
-      batch_residuals(1, b_m_total) = obs(i)%alt_obs - b_pred_alt
-      batch_residuals(2, b_m_total) = obs(i)%az_obs  - b_pred_az
+      batch_residuals(1, b_m_total) = obs(i)%ra_deg - b_pred_alt
+      batch_residuals(2, b_m_total) = obs(i)%dec_deg  - b_pred_az
       if (batch_residuals(2, b_m_total) > 180.0_dp)  batch_residuals(2, b_m_total) = batch_residuals(2, b_m_total) - 360.0_dp
       if (batch_residuals(2, b_m_total) < -180.0_dp) batch_residuals(2, b_m_total) = batch_residuals(2, b_m_total) + 360.0_dp
     end do
@@ -82,8 +82,8 @@
                            b_pred_alt_p, b_pred_az_p)
 
         b_row = (b_ii - 1) * NM_BATCH
-        batch_H(b_row+1, b_col) = (b_pred_alt_p - (obs(batch_obs_idx(b_ii))%alt_obs - batch_residuals(1,b_ii))) / b_delta_param
-        batch_H(b_row+2, b_col) = (b_pred_az_p  - (obs(batch_obs_idx(b_ii))%az_obs  - batch_residuals(2,b_ii))) / b_delta_param
+        batch_H(b_row+1, b_col) = (b_pred_alt_p - (obs(batch_obs_idx(b_ii))%ra_deg - batch_residuals(1,b_ii))) / b_delta_param
+        batch_H(b_row+2, b_col) = (b_pred_az_p  - (obs(batch_obs_idx(b_ii))%dec_deg  - batch_residuals(2,b_ii))) / b_delta_param
       end do
     end do
 

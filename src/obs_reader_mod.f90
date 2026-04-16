@@ -1,5 +1,5 @@
 ! ─────────────────────────────────────────────────────────────────────
-!  obs_reader_mod — reads synthetic Sun/Moon alt/az observations
+!  obs_reader_mod — reads transit circle RA/Dec observations
 ! ─────────────────────────────────────────────────────────────────────
 module obs_reader_mod
   use constants_mod
@@ -10,12 +10,9 @@ module obs_reader_mod
   type :: observation
     real(dp) :: jd
     integer  :: body       ! 1=Sun, 2=Moon
-    integer  :: event      ! 1=R, 2=S, 3=I
-    real(dp) :: alt_obs    ! degrees
-    real(dp) :: az_obs     ! degrees
-    real(dp) :: alt_true   ! degrees
-    real(dp) :: az_true    ! degrees
-    real(dp) :: dist       ! AU
+    real(dp) :: ra_deg     ! right ascension (degrees, apparent of date)
+    real(dp) :: dec_deg    ! declination (degrees, apparent of date)
+    real(dp) :: dist       ! AU (0 if unavailable)
   end type
 
 contains
@@ -28,9 +25,9 @@ contains
 
     integer :: u, ios
     character(len=512) :: line
-    character(1) :: body_c, event_c
-    real(dp) :: jd, alt_o, az_o, alt_t, az_t, dist
-    integer :: bi, ei
+    character(1) :: body_c
+    real(dp) :: jd, ra, dec, dist
+    integer :: bi
 
     open(newunit=u, file=filename, status='old', action='read')
     n_obs = 0
@@ -38,25 +35,19 @@ contains
       read(u, '(A)', iostat=ios) line
       if (ios /= 0) exit
       if (line(1:1) == '#') cycle
-      read(line, *, iostat=ios) jd, body_c, event_c, alt_o, az_o, alt_t, az_t, dist
+      read(line, *, iostat=ios) jd, body_c, ra, dec, dist
       if (ios /= 0) cycle
       if (jd > jd_max) cycle
       if (body_c == 'S') then; bi = 1; else; bi = 2; end if
-      if (event_c == 'R') then; ei = 1
-      else if (event_c == 'S') then; ei = 2
-      else; ei = 3; end if
       n_obs = n_obs + 1
       if (n_obs > MAX_OBS) then
         n_obs = MAX_OBS; exit
       end if
-      obs(n_obs)%jd       = jd
-      obs(n_obs)%body     = bi
-      obs(n_obs)%event    = ei
-      obs(n_obs)%alt_obs  = alt_o
-      obs(n_obs)%az_obs   = az_o
-      obs(n_obs)%alt_true = alt_t
-      obs(n_obs)%az_true  = az_t
-      obs(n_obs)%dist     = dist
+      obs(n_obs)%jd      = jd
+      obs(n_obs)%body    = bi
+      obs(n_obs)%ra_deg  = ra
+      obs(n_obs)%dec_deg = dec
+      obs(n_obs)%dist    = dist
     end do
     close(u)
   end subroutine
