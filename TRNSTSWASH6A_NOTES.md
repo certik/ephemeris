@@ -1,10 +1,18 @@
-# Notes on trnstswash6a.txt
+# Proving that historical transit circle data is geocentric
+
+This document presents three independent lines of evidence that the USNO
+and Greenwich transit circle observations we use are **geocentric** (parallax
+removed), not topocentric (as observed from the telescope).
+
+---
+
+## 1. The obs_type flag in trnstswash6a.txt
 
 Source: <https://ssd.jpl.nasa.gov/dat/planets/trnstswash6a.txt>
 Format: O'Handley (1968), JPL Technical Report 32-1296
         <https://ssd.jpl.nasa.gov/dat/planets/optical_format.txt>
 
-## Planet code 010 is the Sun, not the Moon
+### Planet code 010 is the Sun, not the Moon
 
 The file uses NAIF target IDs. In NAIF numbering, **10 = Sun** (not Moon,
 which is 301). The planet codes present in the file are:
@@ -22,12 +30,14 @@ which is 301). The planet codes present in the file are:
 
 There is no Moon data in this file.
 
-## All observations are geocentric
+### All observations are geocentric by flag
 
 Every record has `obs_type = 1` (transit, geocentric). There are **no**
 topocentric observations (`obs_type = 4`) in this file.
 
-## Comparison with the USNO catalog PDF
+---
+
+## 2. Byte-level comparison: trnstswash6a.txt vs USNO catalog PDF
 
 The Sun positions in `trnstswash6a.txt` were compared against positions
 extracted by OCR from the definitive USNO catalog
@@ -56,8 +66,86 @@ Over 743 matched observations (1963–1971):
 | Max absolute |    0.060 |     0.012 |
 
 The two datasets are identical to within parsing precision. Both contain
-geocentric positions with parallax already removed, as confirmed by:
+geocentric positions with parallax already removed, as confirmed by the
+USNO catalog text (page 183): *"all positions given in this catalog are
+geocentric and refer to the center of the object observed."*
 
-1. The `obs_type = 1` flag (transit, geocentric)
-2. The USNO catalog text (page 183): *"all positions given in this catalog
-   are geocentric and refer to the center of the object observed"*
+---
+
+## 3. Computational proof: Greenwich 1948 Moon observation
+
+The most direct proof: we compute the Moon's position both from the Earth's
+center (geocentric) and from the observatory surface (topocentric) and see
+which one matches the published observation.
+
+### Method
+
+A transit circle measures the instant an object crosses the local meridian.
+The **right ascension is the time measurement** — it equals the local
+sidereal time at the moment of transit. So the published RA tells us the
+exact time of observation. We:
+
+1. Use the observed RA to find the precise UT of transit (by bisection)
+2. At that UT, compute the Moon's **declination** two ways:
+   - **Geocentric**: from the Earth's center
+   - **Topocentric**: from the Greenwich Observatory surface (51.48° N)
+3. Compare each with the published declination
+
+### Test case
+
+From *Greenwich Observations 1948*, page A12 (Jan 18, 1948):
+
+- **Observed RA** = 1h 13m 27.56s
+- **Observed Dec** = +4° 52′ 52.65″
+
+Computation using DE440s ephemeris with IAU 2000A precession/nutation
+(program: `app/greenwich_test.f90`):
+
+```
+=================================================================
+ Greenwich Transit Circle - Moon - 1948 Jan 18
+ Observed: RA = 1h 13m 27.56s, Dec = +4d 52' 52.65"
+=================================================================
+
+  TOPOCENTRIC (from Greenwich surface):
+    Transit UT =    17.41978831 h
+    Dec = +04d 12'  7.44"
+    Dec residual (obs - comp):    2445.21"
+
+  GEOCENTRIC (from Earth center):
+    Transit UT =    17.42036521 h
+    Dec = +04d 52' 53.96"
+    Dec residual (obs - comp):      -1.31"
+
+ =========================================
+  Topocentric Dec residual:    2445.21"
+  Geocentric  Dec residual:      -1.31"
+  Topo - Geo (parallax):      -2446.52"
+ =========================================
+```
+
+### Result
+
+| Model       | Dec residual (obs − computed) |
+|-------------|-------------------------------|
+| Geocentric  | **−1.31″**                    |
+| Topocentric | +2445″ (= +40.8′)            |
+
+The observation matches the **geocentric** computation to **1.3 arcseconds**,
+consistent with the ~1″ precision of transit circle data.
+
+The topocentric position differs by **40.8 arcminutes** — exactly the
+expected lunar diurnal parallax at Greenwich's latitude:
+
+  Δδ ≈ HP × sin(φ − δ) ≈ 57′ × sin(51.5° − 5°) ≈ 57′ × 0.72 ≈ 41′
+
+### Conclusion
+
+The Greenwich 1948 transit circle data is **geocentric beyond any doubt**.
+The parallax has been removed using the observatory's known position and
+the Moon's distance from the contemporary ephemeris.
+
+This is consistent with standard practice for all major transit circle
+catalogs of the 19th and 20th centuries: parallax, refraction, aberration,
+and orbital motion corrections were applied during data reduction, and only
+geocentric positions were published.
