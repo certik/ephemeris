@@ -110,19 +110,22 @@ def wrap180(deg):
     return (deg + 180) % 360 - 180
 
 dec_moon       = moon_d_d.dec.deg
-sep_moon_jup   = moon_j.separation(jupiter).deg
-sep_moon_alde  = moon_a.separation(aldebaran).deg
+dRA_moon_jup   = wrap180(moon_j_d.ra.deg - jup_d.ra.deg)
+dRA_moon_alde  = wrap180(moon_a_d.ra.deg - ald_d.ra.deg)
 
-# Tycho's measured values
+# Tycho's "distantia aequatorea" is the difference in right ascension
+# (equatorial projection), NOT the great-circle angular distance. Tycho
+# derived these from his raw sky-distance measurements combined with
+# measured declinations.
 tycho = {
     'Declination of Moon center':         18 + 37/60,    # +18d 37'
-    'Moon - Jupiter   (angular dist.)':   29 + 4/60,     # 29d 4'
-    'Moon - Aldebaran (angular dist.)':   25 + 24.5/60,  # 25d 24.5'
+    'Moon - Jupiter   (Dist. aequatorea = Delta RA)':   29 + 4/60,
+    'Moon - Aldebaran (Dist. aequatorea = Delta RA)':   25 + 24.5/60,
 }
 mine = {
     'Declination of Moon center':         dec_moon,
-    'Moon - Jupiter   (angular dist.)':   sep_moon_jup,
-    'Moon - Aldebaran (angular dist.)':   sep_moon_alde,
+    'Moon - Jupiter   (Dist. aequatorea = Delta RA)':   dRA_moon_jup,
+    'Moon - Aldebaran (Dist. aequatorea = Delta RA)':   dRA_moon_alde,
 }
 
 rows = []
