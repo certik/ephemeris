@@ -1,91 +1,129 @@
 """
-Modern topocentric ephemeris for Tycho Brahe's 21 January 1586 (Julian)
-Moon observation at Uraniborg.
+Modern topocentric ephemeris reproducing Tycho Brahe's
+21 January 1586 (Julian) Moon observations at Uraniborg (Hven, Denmark).
 
-Fixes applied vs. the original tycho.py:
-  1. Date: 21 Jan 1586 Julian = 31 Jan 1586 Gregorian (10-day calendar shift).
-  2. Clock times are local mean solar time at Uraniborg (lon = 12°42' E);
-     convert to UT by subtracting lon/15 hours (~50.8 min).
-  3. Aldebaran J2000 RA is 4h35m55s, not 4h00m.
+Source: Tycho Brahe, *Loca Lunae*, 1586, p. 30.
 
-Ephemeris: astropy 'builtin' (ERFA analytical). Note this is extrapolated
-outside 1900-2100, so planetary positions (e.g. Jupiter) at 1586 are only
-accurate to ~degrees. Moon and Sun remain good to ~arcmin. For full accuracy
-in the 16th century, load the long DE441 kernel (de441_part-1.bsp).
+Observation details
+-------------------
+  Date:                 21 Jan 1586 Julian  =  31 Jan 1586 Gregorian
+  Clock times (H.M):    astronomical day counted from **noon** of Jan 21 Julian
+                        H. 9      --> civil 21:00 Uraniborg local mean time
+  Location:             Uraniborg, lat 55d54'N, lon 12d42'E
+
+Quantities measured by Tycho:
+  * Declination of Moon center
+  * "Distantia aequatorea" Moon-Jupiter  = difference in RIGHT ASCENSION
+    (29 deg 4', after applying Moon semi-diameter 16')
+  * "Distantia aequatorea" Moon-Aldebaran = difference in RIGHT ASCENSION
+    (25 deg 24.5')
+  * Right ascensions of Moon, Jupiter, Aldebaran at H. 9 completa
+
+Bugs fixed vs the original tycho.py:
+  1. Calendar:  Jan 21 Julian = Jan 31 Gregorian (10-day shift).
+  2. Clock:     hours are astronomical-day (counted from local apparent noon
+                of Jan 21 Julian), not civil morning of Jan 21.
+  3. Longitude: Uraniborg lon = 12d42' E -> UT = local - 50.8 min.
+  4. Aldebaran: J2000 RA is 4h 35m 55s, not 4h 00m.
+  5. "Distantia aequatorea" is Delta-RA, not great-circle separation.
+  6. Comparisons are in **equinox of date (1586)**, not ICRS/J2000, because
+     Tycho's RAs are naturally in the equinox of his own epoch.
+  7. Ephemeris: long-span DE441 kernel covering years 13200 BC - 1969 AD
+     (the default de440s.bsp / de441s.bsp only span 1849-2150).
 """
 
 import astropy.units as u
 from astropy.time import Time, TimeDelta
 from astropy.coordinates import (
     solar_system_ephemeris, EarthLocation, SkyCoord, get_body,
+    PrecessedGeocentric,
 )
 import pandas as pd
 
-# Uraniborg observatory (Hven, Denmark)
-URANIBORG_LAT_DEG = 55 + 54/60        # 55° 54' N
-URANIBORG_LON_DEG = 12 + 42/60        # 12° 42' E
-loc = EarthLocation(
-    lat=URANIBORG_LAT_DEG * u.deg,
-    lon=URANIBORG_LON_DEG * u.deg,
-    height=40 * u.m,
-)
-
-# Local mean solar time offset from UT (east positive)
+# ----------------------------------------------------------------------------
+# Observation setup
+# ----------------------------------------------------------------------------
+URANIBORG_LAT_DEG = 55 + 54/60
+URANIBORG_LON_DEG = 12 + 42/60
+loc = EarthLocation(lat=URANIBORG_LAT_DEG * u.deg,
+                    lon=URANIBORG_LON_DEG * u.deg,
+                    height=40 * u.m)
 LOCAL_OFFSET = TimeDelta(URANIBORG_LON_DEG / 15.0 * 3600.0, format='sec')
 
-
-def local_to_ut(date_greg: str, h: int, m: float):
-    """Convert Uraniborg local mean solar time to UT1."""
-    s = int(round((m - int(m)) * 60))
-    t_local = Time(f"{date_greg} {h:02d}:{int(m):02d}:{s:02d}", scale='ut1')
-    return t_local - LOCAL_OFFSET
+# Astronomical day for 21 Jan 1586 Julian starts at local noon on
+# 31 Jan 1586 Gregorian.
+NOON_LOCAL_JAN21_JULIAN = Time('1586-01-31 12:00:00', scale='ut1') - LOCAL_OFFSET
 
 
-# 21 Jan 1586 Julian calendar = 31 Jan 1586 Gregorian
-DATE = "1586-01-31"
-t_decl     = local_to_ut(DATE, 9, 0)      # ~H. 9 completa
-t_moon_jup = local_to_ut(DATE, 8, 55.5)   # H. 8 M. 55½
-t_moon_alde = local_to_ut(DATE, 9, 2.5)   # H. 9 M. 2½
+def astro_hour(h: int, m: float) -> Time:
+    """'H. h M. m' (astronomical reckoning) -> UT1."""
+    return NOON_LOCAL_JAN21_JULIAN + TimeDelta((h * 60 + m) * 60.0, format='sec')
 
-# Ephemeris
-solar_system_ephemeris.set('builtin')
 
-moon_decl = get_body('moon',    t_decl,     location=loc)
-moon_jup  = get_body('moon',    t_moon_jup, location=loc)
-jupiter   = get_body('jupiter', t_moon_jup, location=loc)
-moon_alde = get_body('moon',    t_moon_alde, location=loc)
+t_decl      = astro_hour(9, 0)       # "H. 9 completa"
+t_moon_jup  = astro_hour(8, 55.5)    # "H. 8 M. 55 1/2"
+t_moon_alde = astro_hour(9, 2.5)     # "H. 9 M. 2 1/2"
 
-# Aldebaran (α Tauri), J2000 ICRS (Hipparcos)
+# ----------------------------------------------------------------------------
+# Ephemeris: long-span DE441
+# ----------------------------------------------------------------------------
+DE441_LONG = "/Users/ondrej/repos/python-skyfield/examples/de441_part-1.bsp"
+solar_system_ephemeris.set(DE441_LONG)
+
+# ICRS / J2000 apparent topocentric positions
+moon_d  = get_body('moon',    t_decl,     location=loc)
+moon_j  = get_body('moon',    t_moon_jup, location=loc)
+jupiter = get_body('jupiter', t_moon_jup, location=loc)
+moon_a  = get_body('moon',    t_moon_alde, location=loc)
+# Aldebaran, J2000 ICRS (Hipparcos)
 aldebaran = SkyCoord(ra='04h35m55.24s', dec='+16d30m33.5s', frame='icrs')
 
-dec_modern_deg         = moon_decl.dec.deg
-dist_moon_jup_deg      = moon_jup.separation(jupiter).deg
-dist_moon_alde_deg     = moon_alde.separation(aldebaran).deg
+# Precess to equinox of date for direct comparison with Tycho's numbers
+def of_date(sc, t):
+    return sc.transform_to(PrecessedGeocentric(equinox=t, obstime=t))
 
-tycho_values = {
-    'Declination (Moon center)':    18 + 37/60,        # +18° 37'
-    'Angular dist. Moon-Jupiter':   29 + 4/60,         # 29° 04'
-    'Angular dist. Moon-Aldebaran': 25 + 24.5/60,      # 25° 24.5'
+moon_d_d  = of_date(moon_d,    t_decl)
+moon_j_d  = of_date(moon_j,    t_moon_jup)
+jup_d     = of_date(jupiter,   t_moon_jup)
+moon_a_d  = of_date(moon_a,    t_moon_alde)
+ald_d     = of_date(aldebaran, t_moon_alde)
+
+# ----------------------------------------------------------------------------
+# Observables (NB: "Distantia aequatorea" = RA difference, not separation)
+# ----------------------------------------------------------------------------
+def wrap180(deg):
+    return (deg + 180) % 360 - 180
+
+dec_moon       = moon_d_d.dec.deg
+dRA_moon_jup   = wrap180(moon_j_d.ra.deg - jup_d.ra.deg)
+dRA_moon_alde  = wrap180(moon_a_d.ra.deg - ald_d.ra.deg)
+
+# Tycho's values
+tycho = {
+    'Declination of Moon center':       18 + 37/60,    # +18d 37'
+    'Moon - Jupiter  (Delta RA)':       29 + 4/60,     # 29d 4'
+    'Moon - Aldebaran (Delta RA)':      25 + 24.5/60,  # 25d 24.5'
 }
-modern_values = {
-    'Declination (Moon center)':    dec_modern_deg,
-    'Angular dist. Moon-Jupiter':   dist_moon_jup_deg,
-    'Angular dist. Moon-Aldebaran': dist_moon_alde_deg,
+mine = {
+    'Declination of Moon center':       dec_moon,
+    'Moon - Jupiter  (Delta RA)':       dRA_moon_jup,
+    'Moon - Aldebaran (Delta RA)':      dRA_moon_alde,
 }
 
-data = {
-    'Quantity': [
-        'Declination of Moon center (°)',
-        'Angular distance Moon-Jupiter (°)',
-        'Angular distance Moon-Aldebaran (°)',
-    ],
-    'Tycho Brahe':        [tycho_values[k]  for k in tycho_values],
-    'Modern (builtin)':   [round(modern_values[k], 6) for k in modern_values],
-    'Error (Tycho - Modern) (arcmin)': [
-        round((tycho_values[k] - modern_values[k]) * 60, 1) for k in tycho_values
-    ],
-}
-print(pd.DataFrame(data).to_string(index=False))
-print("\nNote: 'builtin' ephemeris extrapolates outside 1900-2100;")
-print("Jupiter at 1586 is only accurate to ~1 degree. Use DE441 long kernel")
-print("for full ~arcmin-level accuracy on all three quantities.")
+rows = []
+for k in tycho:
+    err_arcmin = (tycho[k] - mine[k]) * 60
+    rows.append((k + ' (deg)', round(tycho[k], 4), round(mine[k], 4), round(err_arcmin, 2)))
+print(pd.DataFrame(rows, columns=['Quantity', 'Tycho', 'DE441 (of date)',
+                                  'Error Tycho-Mine (arcmin)']).to_string(index=False))
+
+# Also the three RAs Tycho lists
+print()
+print('Right ascensions at H. 9 completa (equinox of date):')
+def fmt_dms(deg):
+    d = int(deg); m = (deg - d) * 60
+    return f"{d:3d} deg {m:5.1f} min"
+m_RA_at_9 = of_date(get_body('moon', t_decl, location=loc), t_decl).ra.deg
+print(f'  Moon       Tycho  88 deg 29.0 min   DE441 {fmt_dms(m_RA_at_9)}   (diff {( 88 + 29/60 - m_RA_at_9)*60:+6.2f}\')')
+print(f'  Jupiter    Tycho  59 deg 25.0 min   DE441 {fmt_dms(jup_d.ra.deg)}   (diff {( 59 + 25/60 - jup_d.ra.deg)*60:+6.2f}\')')
+print(f'  Aldebaran  Tycho  63 deg  5.0 min   DE441 {fmt_dms(ald_d.ra.deg)}   (diff {( 63 +  5/60 - ald_d.ra.deg)*60:+6.2f}\')')
