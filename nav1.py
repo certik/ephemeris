@@ -79,11 +79,19 @@ def main():
         else:
             return f"{lon_deg:.4f}° W"
 
+    # Google Maps: positive N/E, negative S/W.
+    def gmaps_lon(lon_deg):
+        return (360 - lon_deg) if lon_deg > 180 else -lon_deg
+
     print("\n=== Computed Positions ===")
     print(f"1. Longitude (LHA = {lha1:.2f}°): {format_lon(lon1)}")
     print(f"2. Longitude (LHA = {lha2:.2f}°): {format_lon(lon2)}")
     print("\nNote: The western longitude is usually the practical nighttime solution; the eastern is the alternate daytime fix.")
     print("      Polaris altitude is used directly as latitude (standard approximation; tables add <1° correction if needed).")
+
+    print("\n=== Google Maps (lat, lon) ===")
+    print(f"1. {lat:.6f}, {gmaps_lon(lon1):.6f}")
+    print(f"2. {lat:.6f}, {gmaps_lon(lon2):.6f}")
 
 if __name__ == "__main__":
     main()
