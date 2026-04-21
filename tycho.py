@@ -21,8 +21,8 @@ import pandas as pd
 # 1. Uraniborg observatory location (Hven, Denmark)
 # =============================================================================
 loc = EarthLocation(
-    lat=55 + 54/60 * u.deg,      # 55° 54' N
-    lon=12 + 42/60 * u.deg,      # 12° 42' E
+    lat=(55 + 54/60) * u.deg,    # 55° 54' N
+    lon=(12 + 42/60) * u.deg,    # 12° 42' E
     height=40 * u.m
 )
 
@@ -48,7 +48,7 @@ moon_jup  = get_body('moon', t_moon_jup, location=loc)
 jupiter   = get_body('jupiter', t_moon_jup, location=loc)
 
 # Aldebaran (α Tauri) – ICRS J2000 coordinates (precession effect << 1' for this purpose)
-aldebaran = SkyCoord(ra=4*15*u.hourangle, dec=16 + 30.5/60*u.deg, frame='icrs')
+aldebaran = SkyCoord(ra=4*15*u.hourangle, dec=(16 + 30.5/60)*u.deg, frame='icrs')
 
 moon_alde = get_body('moon', t_moon_alde, location=loc)
 
