@@ -47,11 +47,6 @@ NOON_LOCAL_JAN21_JULIAN = (Time('1586-01-31 12:00:00', scale='ut1')
                            - LOCAL_OFFSET)
 
 
-def astro_hm(h: int, m: float) -> Time:
-    """'H. h M. m' in Tycho's astronomical reckoning -> UT1."""
-    return NOON_LOCAL_JAN21_JULIAN + TimeDelta((h*60 + m)*60.0, format='sec')
-
-
 # -- Ephemeris ---------------------------------------------------------------
 DE441_LONG = "/Users/ondrej/repos/python-skyfield/examples/de441_part-1.bsp"
 solar_system_ephemeris.set(DE441_LONG)
@@ -102,6 +97,67 @@ aldebaran = SkyCoord(ra='04h35m55.24s', dec='+16d30m33.5s', frame='icrs')
 
 
 # ----------------------------------------------------------------------------
+# Compute residuals for arbitrary clock correction, and optimize
+# ----------------------------------------------------------------------------
+def all_residuals_arcmin(clock_min: float):
+    """Return flat array of (Tycho - DE441) residuals in arcmin for a given
+    clock correction (minutes added to Tycho's recorded time)."""
+    def t_at(h, m):
+        return NOON_LOCAL_JAN21_JULIAN + TimeDelta(
+            (h*60 + m + clock_min)*60.0, format='sec')
+    res = []
+    # Horn declinations
+    for h, m, horn, v in MOON_HORN:
+        t = t_at(h, m)
+        mo = get_body('moon', t, location=loc)
+        mo_d = of_date(mo, t)
+        sd = moon_semid_deg(mo)
+        dec_model = mo_d.dec.deg + (sd if horn == 'upper' else -sd)
+        res.append((v - dec_model)*60)
+    # Moon-Jupiter limb
+    for h, m, v in JUP_LIMB:
+        t = t_at(h, m)
+        mo = get_body('moon', t, location=loc)
+        ju = get_body('jupiter', t, location=loc)
+        mo_d = of_date(mo, t); ju_d = of_date(ju, t)
+        sd = moon_semid_deg(mo)
+        model = (mo_d.ra.deg - sd) - ju_d.ra.deg
+        res.append((v - model)*60)
+    # Moon-Aldebaran limb
+    for h, m, v in ALD_LIMB:
+        t = t_at(h, m)
+        mo = get_body('moon', t, location=loc)
+        mo_d = of_date(mo, t); ald_d = of_date(aldebaran, t)
+        sd = moon_semid_deg(mo)
+        model = (mo_d.ra.deg - sd) - ald_d.ra.deg
+        res.append((v - model)*60)
+    return np.array(res)
+
+
+from scipy.optimize import minimize_scalar
+opt = minimize_scalar(
+    lambda c: np.sum(all_residuals_arcmin(c)**2),
+    bracket=(0, 20), method='brent', tol=1e-3)
+BEST_CLOCK_MIN = opt.x
+rms_opt = np.sqrt(np.mean(all_residuals_arcmin(BEST_CLOCK_MIN)**2))
+rms_0   = np.sqrt(np.mean(all_residuals_arcmin(0.0)**2))
+
+TYCHO_CLOCK_CORRECTION_MIN = BEST_CLOCK_MIN
+
+
+def astro_hm_corrected(h, m):
+    return NOON_LOCAL_JAN21_JULIAN + TimeDelta(
+        (h*60 + m + TYCHO_CLOCK_CORRECTION_MIN)*60.0, format='sec')
+
+
+def fmt_time(h: int, m: float) -> str:
+    """Format Tycho's recorded time shifted by the optimized clock correction."""
+    total = h*60 + m + TYCHO_CLOCK_CORRECTION_MIN
+    hh, mm = divmod(total, 60)
+    return f"{int(hh):d}:{mm:05.2f}"
+
+
+# ----------------------------------------------------------------------------
 # Report
 # ----------------------------------------------------------------------------
 def fmt_err(arcmin):
@@ -111,51 +167,45 @@ print('=' * 78)
 print('DIE 21 JANUARII 1586 (Julian)  ==  31 Jan 1586 Gregorian, Uraniborg')
 print('Modern ephemeris: JPL DE441 (long).  Comparison with Tycho\'s raw log.')
 print('=' * 78)
+print(f"\nOptimized clock correction: +{BEST_CLOCK_MIN:.2f} min")
+print(f"  RMS residual uncorrected: {rms_0:5.2f}'   corrected: {rms_opt:5.2f}'")
+print(f"  (times shown below are Tycho's clock + {BEST_CLOCK_MIN:.2f} min)")
 
 print('\nMoon horn declinations (per armillas):')
 print(' time    horn    Tycho      DE441 center+/-s.d.   error')
 for h, m, horn, v in MOON_HORN:
-    t = astro_hm(h, m)
+    t = astro_hm_corrected(h, m)
     mo = get_body('moon', t, location=loc)
     mo_d = of_date(mo, t)
     sd = moon_semid_deg(mo)
     dec_model = mo_d.dec.deg + (sd if horn == 'upper' else -sd)
-    print(f' {h:d}:{m:05.2f}  {horn:5s}  {v:8.4f}    {dec_model:8.4f}          {fmt_err((v-dec_model)*60)}')
+    print(f' {fmt_time(h,m)}  {horn:5s}  {v:8.4f}    {dec_model:8.4f}          {fmt_err((v-dec_model)*60)}')
 
 print('\nMoon apparent diameter:')
-for label, tyc in [('H. 8 M. 41.5', MOON_DIAM_TYCHO_H841),
-                   ('H. 9 M. 0',    MOON_DIAM_TYCHO_H9)]:
-    h, m = (8, 41.5) if label.startswith('H. 8') else (9, 0)
-    t = astro_hm(h, m)
+for label, hm, tyc in [('H. 8 M. 41.5', (8, 41.5), MOON_DIAM_TYCHO_H841),
+                       ('H. 9 M. 0',    (9,  0.0), MOON_DIAM_TYCHO_H9)]:
+    h, m = hm
+    t = astro_hm_corrected(h, m)
     mo = get_body('moon', t, location=loc)
     diam_model = 2 * moon_semid_deg(mo)
-    print(f' {label:14s}  Tycho {tyc*60:5.2f}\'   DE441 {diam_model*60:5.2f}\'   err {(tyc-diam_model)*60:+.2f}\'')
+    print(f' {fmt_time(h,m):8s}  Tycho {tyc*60:5.2f}\'   DE441 {diam_model*60:5.2f}\'   err {(tyc-diam_model)*60:+.2f}\'')
 
 print('\nDift. aequat. (Moon occid. limb - Jupiter):')
 print(' time    Tycho     DE441     error')
 for h, m, v in JUP_LIMB:
-    t = astro_hm(h, m)
+    t = astro_hm_corrected(h, m)
     mo = get_body('moon', t, location=loc); ju = get_body('jupiter', t, location=loc)
     mo_d = of_date(mo, t); ju_d = of_date(ju, t)
     sd = moon_semid_deg(mo)
     model = (mo_d.ra.deg - sd) - ju_d.ra.deg
-    print(f' {h:d}:{m:05.2f}  {v:8.4f}  {model:8.4f}  {fmt_err((v-model)*60)}')
+    print(f' {fmt_time(h,m)}  {v:8.4f}  {model:8.4f}  {fmt_err((v-model)*60)}')
 
 print('\nDift. aequat. (Moon occid. limb - Aldebaran):')
 print(' time    Tycho     DE441     error')
 for h, m, v in ALD_LIMB:
-    t = astro_hm(h, m)
+    t = astro_hm_corrected(h, m)
     mo = get_body('moon', t, location=loc)
     mo_d = of_date(mo, t); ald_d = of_date(aldebaran, t)
     sd = moon_semid_deg(mo)
     model = (mo_d.ra.deg - sd) - ald_d.ra.deg
-    print(f' {h:d}:{m:05.2f}  {v:8.4f}  {model:8.4f}  {fmt_err((v-model)*60)}')
-
-print()
-print('Summary:')
-print('  Horn declinations:   <= ~1.4 arcmin from modern ephemeris')
-print('  Dift. aequat.:       ~3-6 arcmin high, consistent across all 6')
-print('                       measurements -- i.e. Moon appears ~5\' east of')
-print('                       DE441 position.  At Moon rate 0.55\'/min, this')
-print('                       corresponds to ~9 min of clock offset.')
-print('  Moon apparent diam:  within ~2\'.')
+    print(f' {fmt_time(h,m)}  {v:8.4f}  {model:8.4f}  {fmt_err((v-model)*60)}')
