@@ -32,13 +32,28 @@ Bugs fixed vs the original tycho.py:
      (the default de440s.bsp / de441s.bsp only span 1849-2150).
 """
 
+import warnings
+import erfa
 import astropy.units as u
 from astropy.time import Time, TimeDelta
 from astropy.coordinates import (
     solar_system_ephemeris, EarthLocation, SkyCoord, get_body,
     PrecessedGeocentric,
 )
+from astropy.coordinates.baseframe import NonRotationTransformationWarning
+from astropy.utils.iers import conf as iers_conf
+from astropy.utils.exceptions import AstropyWarning
 import pandas as pd
+
+# Silence harmless astropy/ERFA warnings for this 1586-CE calculation:
+#   * ERFA 'dubious year' (date is far outside its calibrated window)
+#   * IERS polar-motion fallback to 50-yr mean (sub-arcsec effect)
+#   * NonRotationTransformationWarning (ICRS->GCRS for separation)
+warnings.filterwarnings('ignore', category=erfa.ErfaWarning)
+warnings.filterwarnings('ignore', category=NonRotationTransformationWarning)
+warnings.filterwarnings('ignore', category=AstropyWarning,
+                        message='.*polar motions.*')
+iers_conf.auto_download = False
 
 # ----------------------------------------------------------------------------
 # Observation setup
@@ -95,19 +110,19 @@ def wrap180(deg):
     return (deg + 180) % 360 - 180
 
 dec_moon       = moon_d_d.dec.deg
-dRA_moon_jup   = wrap180(moon_j_d.ra.deg - jup_d.ra.deg)
-dRA_moon_alde  = wrap180(moon_a_d.ra.deg - ald_d.ra.deg)
+sep_moon_jup   = moon_j.separation(jupiter).deg
+sep_moon_alde  = moon_a.separation(aldebaran).deg
 
-# Tycho's values
+# Tycho's measured values
 tycho = {
-    'Declination of Moon center':       18 + 37/60,    # +18d 37'
-    'Moon - Jupiter  (Delta RA)':       29 + 4/60,     # 29d 4'
-    'Moon - Aldebaran (Delta RA)':      25 + 24.5/60,  # 25d 24.5'
+    'Declination of Moon center':         18 + 37/60,    # +18d 37'
+    'Moon - Jupiter   (angular dist.)':   29 + 4/60,     # 29d 4'
+    'Moon - Aldebaran (angular dist.)':   25 + 24.5/60,  # 25d 24.5'
 }
 mine = {
-    'Declination of Moon center':       dec_moon,
-    'Moon - Jupiter  (Delta RA)':       dRA_moon_jup,
-    'Moon - Aldebaran (Delta RA)':      dRA_moon_alde,
+    'Declination of Moon center':         dec_moon,
+    'Moon - Jupiter   (angular dist.)':   sep_moon_jup,
+    'Moon - Aldebaran (angular dist.)':   sep_moon_alde,
 }
 
 rows = []
