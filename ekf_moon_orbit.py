@@ -129,7 +129,7 @@ def project_state(x):
     """Project state to a physically meaningful region.  e can pass
     smoothly through 0 via reflection (flip omega, M0 by pi)."""
     x = x.copy()
-    x[0] = np.clip(x[0], 2.0*R_EARTH_KM, 10_000_000.0)
+    x[0] = np.clip(x[0], 5.0*R_EARTH_KM, 10_000_000.0)
     if x[1] < 0.0:
         x[1] = -x[1]
         x[4] = x[4] + np.pi
@@ -138,8 +138,8 @@ def project_state(x):
     x[2] = np.clip(x[2], 0.0, np.radians(60.0))
     for k in (3, 4, 5):
         x[k] = x[k] % (2.0 * np.pi)
-    # T_sid clamped to a physically plausible lunar-month window
-    x[6] = float(np.clip(x[6], 25.0, 30.0))
+    # T_sid clamped to +/- 5 sigma around the LS estimate (27.339 +/- 0.036 d)
+    x[6] = float(np.clip(x[6], 27.339 - 0.18, 27.339 + 0.18))
     return x
 
 
@@ -195,7 +195,7 @@ def run(n_outer=6, verbose_inner=False):
         0.0,                       # Omega
         0.0,                       # omega
         0.0,                       # M0
-        30.0,                      # T_sid, days (unbiased guess, within [25,30]), days (unbiased guess)
+        27.339,                    # T_sid, days (Lomb-Scargle estimate), days (unbiased guess)
     ])
 
     # Initial covariance
@@ -206,7 +206,7 @@ def run(n_outer=6, verbose_inner=False):
         np.radians(60.0)**2,       # Omega
         np.radians(60.0)**2,       # omega
         np.radians(180.0)**2,      # M0
-        (3.0)**2,                  # T_sid: +/- 3 days; tight to avoid period aliases
+        (0.036)**2,                # T_sid: LS bootstrap sigma
     ])
 
     # Process noise per step.  Tiny on invariants (T_sid is truly constant),
