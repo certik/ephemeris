@@ -129,7 +129,7 @@ def project_state(x):
     """Project state to a physically meaningful region.  e can pass
     smoothly through 0 via reflection (flip omega, M0 by pi)."""
     x = x.copy()
-    x[0] = np.clip(x[0], 5.0*R_EARTH_KM, 10_000_000.0)
+    x[0] = np.clip(x[0], 2.0*R_EARTH_KM, 10_000_000.0)
     if x[1] < 0.0:
         x[1] = -x[1]
         x[4] = x[4] + np.pi
