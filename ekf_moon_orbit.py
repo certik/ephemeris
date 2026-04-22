@@ -161,7 +161,7 @@ def run(n_outer=6, verbose_inner=False):
     x = np.array([
         400_000.0,               # a, km    (in ballpark)
         0.00,                    # e
-        np.radians(23.4),        # i
+        np.radians(0.0),         # i
         np.radians(0.0),         # Omega
         np.radians(0.0),         # omega
         np.radians(0.0),         # M0
