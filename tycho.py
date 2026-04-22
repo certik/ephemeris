@@ -28,6 +28,8 @@ from astropy.coordinates import (
 from astropy.coordinates.baseframe import NonRotationTransformationWarning
 from astropy.utils.iers import conf as iers_conf
 from astropy.utils.exceptions import AstropyWarning
+from jplephem.spk import SPK
+from scipy.optimize import brentq
 
 # Silence harmless astropy/ERFA warnings for this 1586 computation.
 warnings.filterwarnings('ignore', category=erfa.ErfaWarning)
@@ -50,6 +52,38 @@ NOON_LOCAL_JAN21_JULIAN = (Time('1586-01-31 12:00:00', scale='ut1')
 # -- Ephemeris ---------------------------------------------------------------
 DE441_LONG = "/Users/ondrej/repos/python-skyfield/examples/de441_part-1.bsp"
 solar_system_ephemeris.set(DE441_LONG)
+# We also need raw Sun positions via jplephem because astropy's get_body('sun')
+# misbehaves with this long kernel in 1586.
+_SPK = SPK.open(DE441_LONG)
+
+
+def sun_geocentric_icrs(t: Time) -> SkyCoord:
+    jd = t.tt.jd
+    pos = (_SPK[0, 10].compute(jd)
+           - _SPK[0, 3].compute(jd)
+           - _SPK[3, 399].compute(jd))
+    r = float(np.linalg.norm(pos))
+    ra = float(np.degrees(np.arctan2(pos[1], pos[0])) % 360.0)
+    dec = float(np.degrees(np.arcsin(pos[2]/r)))
+    return SkyCoord(ra=ra*u.deg, dec=dec*u.deg, frame='icrs')
+
+
+def equation_of_time_shift_min(date_str: str) -> float:
+    """Return minutes to ADD to a local apparent-noon-based hour count to
+    obtain the instant on the local mean-solar clock.
+
+    Equals the interval by which apparent noon lags mean noon at Uraniborg
+    on the given (Gregorian) date. For late-January dates this is ~+14 min.
+    """
+    def ha_deg(sec):
+        t = (Time(date_str + ' 00:00:00', scale='ut1')
+             + TimeDelta((12 - URANIBORG_LON_DEG/15.0)*3600 + sec, format='sec'))
+        sun = sun_geocentric_icrs(t).transform_to(
+            PrecessedGeocentric(equinox=t, obstime=t))
+        lst = t.sidereal_time('apparent', longitude=loc.lon).deg
+        return ((lst - sun.ra.deg + 540.0) % 360.0) - 180.0
+    sec = brentq(ha_deg, -3600.0, 3600.0, xtol=1e-3)
+    return sec / 60.0
 
 
 def of_date(sc: SkyCoord, t: Time) -> SkyCoord:
@@ -97,52 +131,15 @@ aldebaran = SkyCoord(ra='04h35m55.24s', dec='+16d30m33.5s', frame='icrs')
 
 
 # ----------------------------------------------------------------------------
-# Compute residuals for arbitrary clock correction, and optimize
+# Apparent-noon-based hour convention: Tycho's "H.0" is local apparent noon
+# (sundial noon), not local mean noon. His clocks run at mean rate (he
+# synchronised them on stellar meridian transits) but the day origin is
+# apparent noon, per standard Renaissance astronomical convention. The
+# equation of time therefore contributes a fixed offset between Tycho's
+# recorded hour and the instant on a mean-solar clock.
 # ----------------------------------------------------------------------------
-def all_residuals_arcmin(clock_min: float):
-    """Return flat array of (Tycho - DE441) residuals in arcmin for a given
-    clock correction (minutes added to Tycho's recorded time)."""
-    def t_at(h, m):
-        return NOON_LOCAL_JAN21_JULIAN + TimeDelta(
-            (h*60 + m + clock_min)*60.0, format='sec')
-    res = []
-    # Horn declinations
-    for h, m, horn, v in MOON_HORN:
-        t = t_at(h, m)
-        mo = get_body('moon', t, location=loc)
-        mo_d = of_date(mo, t)
-        sd = moon_semid_deg(mo)
-        dec_model = mo_d.dec.deg + (sd if horn == 'upper' else -sd)
-        res.append((v - dec_model)*60)
-    # Moon-Jupiter limb
-    for h, m, v in JUP_LIMB:
-        t = t_at(h, m)
-        mo = get_body('moon', t, location=loc)
-        ju = get_body('jupiter', t, location=loc)
-        mo_d = of_date(mo, t); ju_d = of_date(ju, t)
-        sd = moon_semid_deg(mo)
-        model = (mo_d.ra.deg - sd) - ju_d.ra.deg
-        res.append((v - model)*60)
-    # Moon-Aldebaran limb
-    for h, m, v in ALD_LIMB:
-        t = t_at(h, m)
-        mo = get_body('moon', t, location=loc)
-        mo_d = of_date(mo, t); ald_d = of_date(aldebaran, t)
-        sd = moon_semid_deg(mo)
-        model = (mo_d.ra.deg - sd) - ald_d.ra.deg
-        res.append((v - model)*60)
-    return np.array(res)
-
-
-from scipy.optimize import minimize_scalar
-opt = minimize_scalar(
-    lambda c: np.sum(all_residuals_arcmin(c)**2),
-    bracket=(0, 20), method='brent', tol=1e-3)
-BEST_CLOCK_MIN = opt.x
-rms_opt = np.sqrt(np.mean(all_residuals_arcmin(BEST_CLOCK_MIN)**2))
-rms_0   = np.sqrt(np.mean(all_residuals_arcmin(0.0)**2))
-
-TYCHO_CLOCK_CORRECTION_MIN = BEST_CLOCK_MIN
+EOT_SHIFT_MIN = equation_of_time_shift_min('1586-01-31')
+TYCHO_CLOCK_CORRECTION_MIN = EOT_SHIFT_MIN
 
 
 def astro_hm_corrected(h, m):
@@ -151,10 +148,44 @@ def astro_hm_corrected(h, m):
 
 
 def fmt_time(h: int, m: float) -> str:
-    """Format Tycho's recorded time shifted by the optimized clock correction."""
-    total = h*60 + m + TYCHO_CLOCK_CORRECTION_MIN
+    """Format Tycho's recorded time (no clock modification; shown in
+    Tycho's own apparent-noon-based reckoning)."""
+    total = h*60 + m
     hh, mm = divmod(total, 60)
     return f"{int(hh):d}:{mm:05.2f}"
+
+
+def residuals_arcmin():
+    """Return flat array of (Tycho - DE441) residuals in arcmin using
+    only the equation-of-time shift (no fitted clock parameter)."""
+    res = []
+    for h, m, horn, v in MOON_HORN:
+        t = astro_hm_corrected(h, m)
+        mo = get_body('moon', t, location=loc)
+        mo_d = of_date(mo, t)
+        sd = moon_semid_deg(mo)
+        dec_model = mo_d.dec.deg + (sd if horn == 'upper' else -sd)
+        res.append((v - dec_model)*60)
+    for h, m, v in JUP_LIMB:
+        t = astro_hm_corrected(h, m)
+        mo = get_body('moon', t, location=loc)
+        ju = get_body('jupiter', t, location=loc)
+        mo_d = of_date(mo, t); ju_d = of_date(ju, t)
+        sd = moon_semid_deg(mo)
+        model = (mo_d.ra.deg - sd) - ju_d.ra.deg
+        res.append((v - model)*60)
+    for h, m, v in ALD_LIMB:
+        t = astro_hm_corrected(h, m)
+        mo = get_body('moon', t, location=loc)
+        mo_d = of_date(mo, t); ald_d = of_date(aldebaran, t)
+        sd = moon_semid_deg(mo)
+        model = (mo_d.ra.deg - sd) - ald_d.ra.deg
+        res.append((v - model)*60)
+    return np.array(res)
+
+
+_r = residuals_arcmin()
+rms = np.sqrt(np.mean(_r**2))
 
 
 # ----------------------------------------------------------------------------
@@ -167,9 +198,10 @@ print('=' * 78)
 print('DIE 21 JANUARII 1586 (Julian)  ==  31 Jan 1586 Gregorian, Uraniborg')
 print('Modern ephemeris: JPL DE441 (long).  Comparison with Tycho\'s raw log.')
 print('=' * 78)
-print(f"\nOptimized clock correction: +{BEST_CLOCK_MIN:.2f} min")
-print(f"  RMS residual uncorrected: {rms_0:5.2f}'   corrected: {rms_opt:5.2f}'")
-print(f"  (times shown below are Tycho's clock + {BEST_CLOCK_MIN:.2f} min)")
+print(f"\nTycho's clock (H.0) convention: local APPARENT noon (Jan 21 Julian).")
+print(f"Equation-of-time shift to local mean solar: +{EOT_SHIFT_MIN:.2f} min")
+print(f"No further clock adjustment is applied.")
+print(f"All-observation RMS residual: {rms:.2f}'")
 
 print('\nMoon horn declinations (per armillas):')
 print(' time    horn    Tycho      DE441 center+/-s.d.   error')
@@ -209,3 +241,12 @@ for h, m, v in ALD_LIMB:
     sd = moon_semid_deg(mo)
     model = (mo_d.ra.deg - sd) - ald_d.ra.deg
     print(f' {fmt_time(h,m)}  {v:8.4f}  {model:8.4f}  {fmt_err((v-model)*60)}')
+
+# Per-channel residual summary
+print('\nPer-channel residual summary (EoT shift applied, NO clock fit):')
+dec_r = _r[0:6]; jup_r = _r[6:9]; ald_r = _r[9:12]
+for name, x in [('6 horn declinations ', dec_r),
+                ('3 Moon-Jupiter dRA  ', jup_r),
+                ('3 Moon-Aldebaran dRA', ald_r)]:
+    print(f'  {name}  mean = {x.mean():+.2f}\'   '
+          f'scatter(std) = {x.std(ddof=1):.2f}\'')
