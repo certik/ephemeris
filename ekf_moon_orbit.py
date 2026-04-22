@@ -177,8 +177,9 @@ def ekf_pass(x0, P0, Q, R_meas, times: Time, decs_deg: np.ndarray,
     return x, P, res_before, res_after
 
 
-def run(n_outer=6, verbose_inner=False):
-    jds, decs, times, sources = load_observations()
+def run(n_outer=6, verbose_inner=False, obs_path='moon_dec_observations.dat'):
+    jds, decs, times, sources = load_observations(obs_path)
+    print(f'Loaded observations from {obs_path}')
     # Sort by time
     order = np.argsort(jds)
     jds = jds[order]; decs = decs[order]
@@ -289,5 +290,12 @@ def run(n_outer=6, verbose_inner=False):
 
 if __name__ == '__main__':
     import sys
-    n_outer = int(sys.argv[1]) if len(sys.argv) > 1 else 6
-    run(n_outer=n_outer)
+    args = [a for a in sys.argv[1:]]
+    n_outer = 6
+    obs_path = 'moon_dec_observations.dat'
+    for a in args:
+        try:
+            n_outer = int(a)
+        except ValueError:
+            obs_path = a
+    run(n_outer=n_outer, obs_path=obs_path)
