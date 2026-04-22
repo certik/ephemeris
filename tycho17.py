@@ -168,8 +168,11 @@ MOON_SUN = [
     (11, 53.5,       (70 + 58.5/60) + ( 1 + 20.0/60)),   # 72 18.5
 ]
 
-# Single Moon-Sun separation at 8:56.5 given as great-circle distance
-# (plain "distabat", no "aequatoria").
+# Equatorial distance (RA difference) Moon east limb -> Sun center at 8:56.5.
+# The notebook's "distabat ( orientalis limbus a Solis centro" here refers to
+# the equatorial distance (same channel as the 11:38 block), not a great-circle
+# sextant measurement -- confirmed by numerical continuity with the 11:38 data
+# adjusted for ~2h42m of lunar motion.
 MOON_SUN_SEP = [
     (8, 56.5, 73 + 43.0/60),
 ]
@@ -221,11 +224,7 @@ def residuals_arcmin():
     for h, m, v in MOON_SUN_SEP:
         t = t_at(h, m)
         sun_d = apparent_of_date(sun_geocentric_icrs(t), t)
-        mo = get_body('moon', t, location=loc)
-        mo_d = apparent_of_date(mo, t)
-        sd = moon_semid_deg(mo)
-        sep_center = sun_d.separation(mo_d).deg
-        model = sep_center - sd  # east limb -> subtract semid toward Sun
+        model = _wrap(sun_d.ra.deg - _moon_east_limb_ra(t))
         res.append((v - model)*60)
     for h, m, v in MOON_DIAM:
         t = t_at(h, m)
@@ -269,14 +268,11 @@ for h, m, v in MOON_SUN:
     model = _wrap(sun_d.ra.deg - _moon_east_limb_ra(t))
     print(f' {fmt_time(h,m)}  {v:8.4f}  {model:8.4f}  {(v-model)*60:+6.2f}\'')
 
-print('\nMoon-Sun great-circle separation (east limb to Sun center):')
+print('\nDiff. asc. (Sun center - Moon EAST limb) at H.8:56.5:')
 for h, m, v in MOON_SUN_SEP:
     t = t_at(h, m)
     sun_d = apparent_of_date(sun_geocentric_icrs(t), t)
-    mo = get_body('moon', t, location=loc)
-    mo_d = apparent_of_date(mo, t)
-    sd = moon_semid_deg(mo)
-    model = sun_d.separation(mo_d).deg - sd
+    model = _wrap(sun_d.ra.deg - _moon_east_limb_ra(t))
     print(f' {fmt_time(h,m)}  {v:8.4f}  {model:8.4f}  {(v-model)*60:+6.2f}\'')
 
 print('\nMoon apparent diameter:')
@@ -296,7 +292,7 @@ for h, m, v in SUN_DEC:
 
 sizes = [len(MOON_DEC), len(MOON_SUN), len(MOON_SUN_SEP), len(MOON_DIAM),
          len(SUN_DEC)]
-names = ['horn declinations', 'Sun-Moon dRA', 'Moon-Sun great-circle',
+names = ['horn declinations', 'Sun-Moon dRA', 'Sun-Moon dRA (8:56)',
          'Moon diameter', 'Sun declination']
 i = 0
 print('\nPer-channel residual summary:')
