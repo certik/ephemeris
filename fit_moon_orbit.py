@@ -105,13 +105,11 @@ def load_observations(path='moon_dec_observations.dat'):
             line = line.strip()
             if not line or line.startswith('#'):
                 continue
-            # Format: "YYYY-MM-DD HH:MM:SS.SSS  source  horn  raw  center  jd"
-            date, tod = line.split()[0], line.split()[1]
+            # Columns: iso_utc source tag dec_center_deg jd_tt
             parts = line.split()
-            iso = f'{date} {tod}'
             src = parts[2]
-            dec_center = float(parts[5])
-            jd_tt = float(parts[6])
+            dec_center = float(parts[4])
+            jd_tt = float(parts[5])
             times.append(jd_tt)
             decs.append(dec_center)
             sources.append(src)
