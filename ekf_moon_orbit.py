@@ -89,8 +89,9 @@ def project_state(x):
     same orbit, viewed from the opposite apsis).  This lets the filter
     pass smoothly through e=0 in either direction."""
     x = x.copy()
-    # a > 0, reasonable Moon range
-    x[0] = np.clip(x[0], 100_000.0, 1_500_000.0)
+    # a > 0; physical floor is R_earth (Moon can't be inside Earth).
+    # Upper bound is loose -- any realistic lunar distance is < 10 R_lunar_SOI.
+    x[0] = np.clip(x[0], 3*R_EARTH_KM, 10_000_000.0)
     # e reflection through 0
     if x[1] < 0.0:
         x[1] = -x[1]
@@ -159,7 +160,7 @@ def run(n_outer=6, verbose_inner=False):
 
     # --- Initial state (loose but bounded; no ephemeris) ------------------
     x = np.array([
-        400_000.0,               # a, km    (in ballpark)
+        0.0,               # a, km    (in ballpark)
         0.00,                    # e
         np.radians(0.0),         # i
         np.radians(0.0),         # Omega
