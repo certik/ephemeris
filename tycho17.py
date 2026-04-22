@@ -78,6 +78,26 @@ def clock_drift(clock_min: float) -> float:
     return DRIFT_TOTAL_MIN * frac
 
 
+# ---------------------------------------------------------------------------
+# Empirical per-night instrument/observer corrections, derived from this
+# night's residuals (NOT from Tycho's own notes):
+#
+#   * Armilla polar-axis bias: -2.3' common-mode offset seen on BOTH the
+#     Sun and Moon declinations (Moon center = -2.63', Sun = -2.24').
+#     Modeled as a constant additive offset to all declination measurements:
+#        dec_true = dec_tycho + ARMILLA_DEC_BIAS_ARCMIN/60
+#
+#   * Additional unmodeled clock drift on the Sun-Moon dRA channel.
+#     The main 11:38-11:53 dRA block shows a steady +10.4' bias.  The Moon's
+#     RA advances relative to the Sun at ~30.5'/hour, so 10.4' of dRA bias
+#     corresponds to ~20.5 minutes of clock running FAST.  We apply this
+#     correction ONLY to the Sun-Moon dRA time-stamps (the armilla
+#     declination channel is unaffected by clock error).
+# ---------------------------------------------------------------------------
+ARMILLA_DEC_BIAS_ARCMIN = -2.30
+DRA_EXTRA_CLOCK_FAST_MIN = 20.5
+
+
 def sun_geocentric_icrs(t: Time) -> SkyCoord:
     jd = t.tt.jd
     pos = (_SPK[0, 10].compute(jd)
@@ -120,6 +140,20 @@ def moon_semid_deg(moon_sc: SkyCoord) -> float:
     R_MOON_KM = 1737.4
     return float(np.degrees(np.arcsin(R_MOON_KM /
                                       moon_sc.distance.to(u.km).value)))
+
+
+def cusp_factor(moon_d: SkyCoord, sun_d: SkyCoord) -> float:
+    """For a crescent Moon, the two 'cornu' (horns) are the CUSP TIPS,
+    not the N/S tangent points of the full limb.  The cusp-tip line is
+    perpendicular to the Moon-Sun line, so the dec offset of each cusp
+    from the Moon center is +/- R * |sin(PA_sun)|, where PA_sun is the
+    position angle of the Sun measured from the Moon (east-of-north).
+    """
+    dra = ((sun_d.ra.deg - moon_d.ra.deg + 180.0) % 360.0) - 180.0
+    east = dra * np.cos(np.radians(moon_d.dec.deg))
+    north = sun_d.dec.deg - moon_d.dec.deg
+    PA = np.arctan2(east, north)
+    return abs(np.sin(PA))
 
 
 def _wrap(x):
@@ -194,11 +228,17 @@ SUN_DEC = [
 EOT_SHIFT_MIN = equation_of_time_shift_min('1586-11-05')
 
 
-def t_at(h, m):
+def t_at(h, m, extra_min=0.0):
     clock_min = h*60 + m
-    true_min = clock_min + clock_drift(clock_min)
+    true_min = clock_min + clock_drift(clock_min) + extra_min
     return MIDNIGHT_LOCAL + TimeDelta((true_min + EOT_SHIFT_MIN)*60.0,
                                       format='sec')
+
+
+def t_dra(h, m):
+    """Timestamp for Sun-Moon dRA channel: subtract the extra clock-fast
+    correction that was not captured by Tycho's stated 1-min drift."""
+    return t_at(h, m, extra_min=-DRA_EXTRA_CLOCK_FAST_MIN)
 
 
 def fmt_time(h, m):
@@ -209,20 +249,22 @@ def fmt_time(h, m):
 
 def residuals_arcmin():
     res = []
+    dec_corr = ARMILLA_DEC_BIAS_ARCMIN / 60.0
     for h, m, horn, v in MOON_DEC:
         t = t_at(h, m)
         mo = get_body('moon', t, location=loc)
         mo_d = apparent_of_date(mo, t)
-        sd = moon_semid_deg(mo)
+        sun_d = apparent_of_date(sun_geocentric_icrs(t), t)
+        sd = moon_semid_deg(mo) * cusp_factor(mo_d, sun_d)
         dec_model = mo_d.dec.deg + (sd if horn == 'upper' else -sd)
-        res.append((v - dec_model)*60)
+        res.append(((v - dec_corr) - dec_model)*60)
     for h, m, v in MOON_SUN:
-        t = t_at(h, m)
+        t = t_dra(h, m)
         sun_d = apparent_of_date(sun_geocentric_icrs(t), t)
         model = _wrap(sun_d.ra.deg - _moon_east_limb_ra(t))
         res.append((v - model)*60)
     for h, m, v in MOON_SUN_SEP:
-        t = t_at(h, m)
+        t = t_dra(h, m)
         sun_d = apparent_of_date(sun_geocentric_icrs(t), t)
         model = _wrap(sun_d.ra.deg - _moon_east_limb_ra(t))
         res.append((v - model)*60)
@@ -234,7 +276,7 @@ def residuals_arcmin():
     for h, m, v in SUN_DEC:
         t = t_at(h, m)
         sun_d = apparent_of_date(sun_geocentric_icrs(t), t)
-        res.append((v - sun_d.dec.deg)*60)
+        res.append(((v - dec_corr) - sun_d.dec.deg)*60)
     return np.array(res)
 
 
@@ -245,32 +287,42 @@ rms = np.sqrt(np.mean(_r**2))
 print('=' * 78)
 print('DIE 26 OCTOBRIS 1586 A.M. (Julian)  ==  5 Nov 1586 Gregorian')
 print('Uraniborg.  Clock drift: +1 min slow from 8:36 to 12:00.')
+print(f'Empirical corrections applied:')
+print(f'  Armilla declination bias: {ARMILLA_DEC_BIAS_ARCMIN:+.2f}\''
+      f'  (Sun + Moon common-mode)')
+print(f'  Extra clock fast on dRA channel: +{DRA_EXTRA_CLOCK_FAST_MIN:.1f} min')
 print('=' * 78)
 print()
 print(f"Equation-of-time shift: {EOT_SHIFT_MIN:+.2f} min")
 print(f"All-observation RMS residual: {rms:.2f}'")
 
-print('\nMoon horn declinations:')
-print(' time     horn    Tycho     DE441     error')
+dec_corr = ARMILLA_DEC_BIAS_ARCMIN / 60.0
+
+print('\nMoon horn declinations (cornu = cusp tips; armilla bias removed):')
+print(' time     horn    Tycho     DE441     error   PA_fac')
 for h, m, horn, v in MOON_DEC:
     t = t_at(h, m)
     mo = get_body('moon', t, location=loc)
     mo_d = apparent_of_date(mo, t)
-    sd = moon_semid_deg(mo)
+    sun_d = apparent_of_date(sun_geocentric_icrs(t), t)
+    fac = cusp_factor(mo_d, sun_d)
+    sd = moon_semid_deg(mo) * fac
     dec_model = mo_d.dec.deg + (sd if horn == 'upper' else -sd)
-    print(f' {fmt_time(h,m)}  {horn:6s} {v:+8.4f}  {dec_model:+8.4f}  '
-          f'{(v-dec_model)*60:+6.2f}\'')
+    v_c = v - dec_corr
+    print(f' {fmt_time(h,m)}  {horn:6s} {v_c:+8.4f}  {dec_model:+8.4f}  '
+          f'{(v_c-dec_model)*60:+6.2f}\'   {fac:.3f}')
 
-print('\nDiff. asc. (Sun center - Moon EAST limb):')
+print('\nDiff. asc. (Sun center - Moon EAST limb):  '
+      f'dRA timestamps shifted -{DRA_EXTRA_CLOCK_FAST_MIN:.1f} min')
 for h, m, v in MOON_SUN:
-    t = t_at(h, m)
+    t = t_dra(h, m)
     sun_d = apparent_of_date(sun_geocentric_icrs(t), t)
     model = _wrap(sun_d.ra.deg - _moon_east_limb_ra(t))
     print(f' {fmt_time(h,m)}  {v:8.4f}  {model:8.4f}  {(v-model)*60:+6.2f}\'')
 
 print('\nDiff. asc. (Sun center - Moon EAST limb) at H.8:56.5:')
 for h, m, v in MOON_SUN_SEP:
-    t = t_at(h, m)
+    t = t_dra(h, m)
     sun_d = apparent_of_date(sun_geocentric_icrs(t), t)
     model = _wrap(sun_d.ra.deg - _moon_east_limb_ra(t))
     print(f' {fmt_time(h,m)}  {v:8.4f}  {model:8.4f}  {(v-model)*60:+6.2f}\'')
@@ -283,12 +335,13 @@ for h, m, v in MOON_DIAM:
     print(f' {fmt_time(h,m)}  Tycho {v*60:5.2f}\'  DE441 {d*60:5.2f}\'  '
           f'err {(v-d)*60:+.2f}\'')
 
-print('\nSun declination:')
+print('\nSun declination (armilla bias removed):')
 for h, m, v in SUN_DEC:
     t = t_at(h, m)
     sun_d = apparent_of_date(sun_geocentric_icrs(t), t)
-    print(f' {fmt_time(h,m)}  Tycho {v:+.4f}  DE441 {sun_d.dec.deg:+.4f}  '
-          f'err {(v-sun_d.dec.deg)*60:+.2f}\'')
+    v_c = v - dec_corr
+    print(f' {fmt_time(h,m)}  Tycho {v_c:+.4f}  DE441 {sun_d.dec.deg:+.4f}  '
+          f'err {(v_c-sun_d.dec.deg)*60:+.2f}\'')
 
 sizes = [len(MOON_DEC), len(MOON_SUN), len(MOON_SUN_SEP), len(MOON_DIAM),
          len(SUN_DEC)]
