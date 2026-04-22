@@ -116,8 +116,18 @@ def sun_semid_deg(sun_sc: SkyCoord) -> float:
 
 
 # Reference stars (J2000 ICRS)
-hamal = SkyCoord(ra='02h07m10.41s', dec='+23d27m44.7s', frame='icrs')
-aldebaran = SkyCoord(ra='04h35m55.24s', dec='+16d30m33.5s', frame='icrs')
+hamal = SkyCoord(
+    ra='02h07m10.41s', dec='+23d27m44.7s',
+    pm_ra_cosdec=188.55*u.mas/u.yr, pm_dec=-148.08*u.mas/u.yr,
+    distance=(1.0/0.01466)*u.pc,
+    obstime='J2000.0', frame='icrs',
+)
+aldebaran = SkyCoord(
+    ra='04h35m55.24s', dec='+16d30m33.5s',
+    pm_ra_cosdec=63.45*u.mas/u.yr, pm_dec=-188.94*u.mas/u.yr,
+    distance=(1.0/0.04894)*u.pc,
+    obstime='J2000.0', frame='icrs',
+)
 
 
 # ----------------------------------------------------------------------------
@@ -233,7 +243,7 @@ def residuals_arcmin():
         t = t_at(h, m)
         mo = get_body('moon', t, location=loc)
         mo_d = apparent_of_date(mo, t)
-        ham_d = apparent_of_date(hamal, t)
+        ham_d = apparent_of_date(hamal.apply_space_motion(new_obstime=t), t)
         sd = moon_semid_deg(mo)
         model = (mo_d.ra.deg + sd) - ham_d.ra.deg
         res.append((v - model)*60)
@@ -241,7 +251,7 @@ def residuals_arcmin():
         t = t_at(h, m)
         mo = get_body('moon', t, location=loc)
         mo_d = apparent_of_date(mo, t)
-        ald_d = apparent_of_date(aldebaran, t)
+        ald_d = apparent_of_date(aldebaran.apply_space_motion(new_obstime=t), t)
         sd = moon_semid_deg(mo)
         model = (mo_d.ra.deg + sd) - ald_d.ra.deg
         res.append((v - model)*60)
@@ -310,7 +320,7 @@ for h, m, v in HAM_LIMB:
     t = t_at(h, m)
     mo = get_body('moon', t, location=loc)
     mo_d = apparent_of_date(mo, t)
-    ham_d = apparent_of_date(hamal, t)
+    ham_d = apparent_of_date(hamal.apply_space_motion(new_obstime=t), t)
     sd = moon_semid_deg(mo)
     model = (mo_d.ra.deg + sd) - ham_d.ra.deg
     print(f' {fmt_time(h,m)}  {v:8.4f}  {model:8.4f}  {(v-model)*60:+6.2f}\'')
@@ -320,7 +330,7 @@ for h, m, v in ALD_LIMB:
     t = t_at(h, m)
     mo = get_body('moon', t, location=loc)
     mo_d = apparent_of_date(mo, t)
-    ald_d = apparent_of_date(aldebaran, t)
+    ald_d = apparent_of_date(aldebaran.apply_space_motion(new_obstime=t), t)
     sd = moon_semid_deg(mo)
     model = (mo_d.ra.deg + sd) - ald_d.ra.deg
     print(f' {fmt_time(h,m)}  {v:8.4f}  {model:8.4f}  {(v-model)*60:+6.2f}\'')

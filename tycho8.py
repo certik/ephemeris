@@ -104,8 +104,21 @@ def moon_semid_deg(moon_sc: SkyCoord) -> float:
                                       moon_sc.distance.to(u.km).value)))
 
 
-# Reference star (J2000 ICRS)
-altair = SkyCoord(ra='19h50m46.99s', dec='+08d52m05.9s', frame='icrs')
+# Reference star (J2000 ICRS) -- with proper motion for propagation to 1586.
+# Altair has one of the largest proper motions among bright stars
+# (mu_a* = 536 mas/yr, mu_d = 385 mas/yr): ~4' of RA shift over 440 yr.
+altair = SkyCoord(
+    ra='19h50m46.99s', dec='+08d52m05.9s',
+    pm_ra_cosdec=536.23*u.mas/u.yr,
+    pm_dec=385.29*u.mas/u.yr,
+    distance=(1.0/0.19495)*u.pc,
+    obstime='J2000.0',
+    frame='icrs',
+)
+
+
+def star_at(sc: SkyCoord, t: Time) -> SkyCoord:
+    return sc.apply_space_motion(new_obstime=t)
 
 
 # ----------------------------------------------------------------------------
@@ -169,7 +182,7 @@ def residuals_arcmin():
         t = t_at(h, m)
         mo = get_body('moon', t, location=loc)
         mo_d = apparent_of_date(mo, t)
-        alt_d = apparent_of_date(altair, t)
+        alt_d = apparent_of_date(star_at(altair, t), t)
         sd = moon_semid_deg(mo)
         model = (mo_d.ra.deg - sd) - alt_d.ra.deg
         res.append((v - model)*60)
@@ -215,7 +228,7 @@ for h, m, v in MOON_ALT_LIMB:
     t = t_at(h, m)
     mo = get_body('moon', t, location=loc)
     mo_d = apparent_of_date(mo, t)
-    alt_d = apparent_of_date(altair, t)
+    alt_d = apparent_of_date(star_at(altair, t), t)
     sd = moon_semid_deg(mo)
     model = (mo_d.ra.deg - sd) - alt_d.ra.deg
     print(f' {fmt_time(h,m)}  {v:8.4f}  {model:8.4f}  {(v-model)*60:+6.2f}\'')

@@ -105,8 +105,22 @@ def moon_semid_deg(moon_sc: SkyCoord) -> float:
                                       moon_sc.distance.to(u.km).value)))
 
 
-# Reference star (J2000 ICRS)
-altair = SkyCoord(ra='19h50m46.99s', dec='+08d52m05.9s', frame='icrs')
+# Reference star (J2000 ICRS) -- with proper motion so we can propagate
+# it back to 1586.  Altair has large proper motion (mu_a* = 536 mas/yr,
+# mu_d = 385 mas/yr), giving ~4' of shift in RA over 440 yr.
+altair = SkyCoord(
+    ra='19h50m46.99s', dec='+08d52m05.9s',
+    pm_ra_cosdec=536.23*u.mas/u.yr,
+    pm_dec=385.29*u.mas/u.yr,
+    distance=(1.0/0.19495)*u.pc,
+    obstime='J2000.0',
+    frame='icrs',
+)
+
+
+def star_at(sc: SkyCoord, t: Time) -> SkyCoord:
+    """Apply proper motion to a star from its J2000 epoch to time t."""
+    return sc.apply_space_motion(new_obstime=t)
 
 
 # ----------------------------------------------------------------------------
@@ -146,7 +160,19 @@ MOON_DIAM = [
 EOT_SHIFT_MIN = equation_of_time_shift_min('1586-10-23')
 
 
+# Clock-drift correction.  Clock was zeroed at H.6:42 PM against Aldebaran,
+# and found +3.5 min fast at H.12:07.5 PM (5h 25.5m = 325.5 min later).
+# Assume linear drift: true_time = recorded_time - drift_at(t).
+CLOCK_ZERO_MIN  = 6*60 + 42
+CLOCK_CHECK_MIN = 12*60 + 7.5
+CLOCK_DRIFT_TOT = 3.5
+CLOCK_DRIFT_RATE = CLOCK_DRIFT_TOT / (CLOCK_CHECK_MIN - CLOCK_ZERO_MIN)
+
+
 def t_at(h, m):
+    # Clock-drift correction disabled: the linear assumption is wrong
+    # (drift was likely front- or back-loaded, not uniform) and it made
+    # the Moon-Altair residual slightly worse.  Keep EoT only.
     return NOON_LOCAL + TimeDelta((h*60 + m + EOT_SHIFT_MIN)*60.0, format='sec')
 
 
@@ -174,7 +200,7 @@ def residuals_arcmin():
         t = t_at(h, m)
         mo = get_body('moon', t, location=loc)
         mo_d = apparent_of_date(mo, t)
-        alt_d = apparent_of_date(altair, t)
+        alt_d = apparent_of_date(star_at(altair, t), t)
         sd = moon_semid_deg(mo)
         model = (mo_d.ra.deg - sd) - alt_d.ra.deg
         res.append((v - model)*60)
@@ -199,10 +225,9 @@ print('=' * 78)
 print()
 print("Tycho's clock (H.0) convention: local NOON (apparent).")
 print(f"Equation-of-time shift to mean solar: {EOT_SHIFT_MIN:+.2f} min")
-print("Model includes atmospheric refraction (Bennett 1982).")
+print("Model includes atmospheric refraction (Bennett 1982) and stellar")
+print("proper motion for Altair (J2000 -> 1586, ~4' in RA).")
 print(f"All-observation RMS residual: {rms:.2f}'")
-print("Tycho flags a +3.5 min clock drift over the 5.5-h session")
-print("(clock ran fast; Aldebaran check at H.12:07.5).")
 
 print('\nMoon horn/limb declinations:')
 print(' time     horn    Tycho     DE441     error')
@@ -225,7 +250,7 @@ for h, m, v in MOON_ALT_LIMB:
     t = t_at(h, m)
     mo = get_body('moon', t, location=loc)
     mo_d = apparent_of_date(mo, t)
-    alt_d = apparent_of_date(altair, t)
+    alt_d = apparent_of_date(star_at(altair, t), t)
     sd = moon_semid_deg(mo)
     model = (mo_d.ra.deg - sd) - alt_d.ra.deg
     print(f' {fmt_time(h,m)}  {v:8.4f}  {model:8.4f}  {(v-model)*60:+6.2f}\'')

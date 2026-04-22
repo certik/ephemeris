@@ -106,7 +106,12 @@ def moon_semid_deg(moon_sc: SkyCoord) -> float:
 
 
 # Aldebaran (alpha Tau), J2000 ICRS from Hipparcos
-aldebaran = SkyCoord(ra='04h35m55.24s', dec='+16d30m33.5s', frame='icrs')
+aldebaran = SkyCoord(
+    ra='04h35m55.24s', dec='+16d30m33.5s',
+    pm_ra_cosdec=63.45*u.mas/u.yr, pm_dec=-188.94*u.mas/u.yr,
+    distance=(1.0/0.04894)*u.pc,
+    obstime='J2000.0', frame='icrs',
+)
 
 
 # ----------------------------------------------------------------------------
@@ -190,7 +195,7 @@ def all_residuals_arcmin():
     for h, m, v in ALD_LIMB:
         t = t_at(h, m)
         mo = get_body('moon', t, location=loc)
-        mo_d = apparent_of_date(mo, t); ald_d = apparent_of_date(aldebaran, t)
+        mo_d = apparent_of_date(mo, t); ald_d = apparent_of_date(aldebaran.apply_space_motion(new_obstime=t), t)
         sd = moon_semid_deg(mo)
         model = (mo_d.ra.deg - sd) - ald_d.ra.deg
         res.append((v - model)*60)
@@ -222,7 +227,7 @@ def aldebaran_hour_angle_deg(clock_min_from_noon):
     """Aldebaran's hour angle at the time NOON_LOCAL + (offset_min) minutes."""
     t = NOON_LOCAL + TimeDelta(clock_min_from_noon*60, format='sec')
     lst = t.sidereal_time('apparent', longitude=loc.lon)
-    ald_d = apparent_of_date(aldebaran, t)
+    ald_d = apparent_of_date(aldebaran.apply_space_motion(new_obstime=t), t)
     ha = (lst.deg - ald_d.ra.deg + 540.0) % 360.0 - 180.0
     return ha
 
@@ -281,7 +286,7 @@ print(' time     Tycho     DE441     error')
 for h, m, v in ALD_LIMB:
     t = t_at(h, m)
     mo = get_body('moon', t, location=loc)
-    mo_d = apparent_of_date(mo, t); ald_d = apparent_of_date(aldebaran, t)
+    mo_d = apparent_of_date(mo, t); ald_d = apparent_of_date(aldebaran.apply_space_motion(new_obstime=t), t)
     sd = moon_semid_deg(mo)
     model = (mo_d.ra.deg - sd) - ald_d.ra.deg
     print(f' {fmt_time(h,m)}  {v:8.4f}  {model:8.4f}  {(v-model)*60:+6.2f}\'')

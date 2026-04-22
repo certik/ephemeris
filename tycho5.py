@@ -106,8 +106,18 @@ def moon_semid_deg(moon_sc: SkyCoord) -> float:
 
 
 # Reference stars (J2000 ICRS)
-hamal  = SkyCoord(ra='02h07m10.41s', dec='+23d27m44.7s', frame='icrs')
-pollux = SkyCoord(ra='07h45m18.95s', dec='+28d01m34.3s', frame='icrs')
+hamal = SkyCoord(
+    ra='02h07m10.41s', dec='+23d27m44.7s',
+    pm_ra_cosdec=188.55*u.mas/u.yr, pm_dec=-148.08*u.mas/u.yr,
+    distance=(1.0/0.01466)*u.pc,
+    obstime='J2000.0', frame='icrs',
+)
+pollux = SkyCoord(
+    ra='07h45m18.95s', dec='+28d01m34.3s',
+    pm_ra_cosdec=-625.69*u.mas/u.yr, pm_dec=-45.95*u.mas/u.yr,
+    distance=(1.0/0.09654)*u.pc,
+    obstime='J2000.0', frame='icrs',
+)
 
 
 # ----------------------------------------------------------------------------
@@ -218,7 +228,7 @@ def residuals_arcmin():
         t = t_at(h, m)
         mo = get_body('moon', t, location=loc)
         mo_d = apparent_of_date(mo, t)
-        ham_d = apparent_of_date(hamal, t)
+        ham_d = apparent_of_date(hamal.apply_space_motion(new_obstime=t), t)
         sd = moon_semid_deg(mo)
         # Moon east limb -> add semidiameter to RA
         model = (mo_d.ra.deg + sd) - ham_d.ra.deg
@@ -227,7 +237,7 @@ def residuals_arcmin():
         t = t_at(h, m)
         mo = get_body('moon', t, location=loc)
         mo_d = apparent_of_date(mo, t)
-        pol_d = apparent_of_date(pollux, t)
+        pol_d = apparent_of_date(pollux.apply_space_motion(new_obstime=t), t)
         sd = moon_semid_deg(mo)
         limb = moon_limb_on_sky(mo_d, pol_d, sd)
         # Great-circle distance from Moon east limb to Pollux
@@ -279,7 +289,7 @@ for h, m, v in HAM_LIMB:
     t = t_at(h, m)
     mo = get_body('moon', t, location=loc)
     mo_d = apparent_of_date(mo, t)
-    ham_d = apparent_of_date(hamal, t)
+    ham_d = apparent_of_date(hamal.apply_space_motion(new_obstime=t), t)
     sd = moon_semid_deg(mo)
     model = (mo_d.ra.deg + sd) - ham_d.ra.deg
     print(f' {fmt_time(h,m)}  {v:8.4f}  {model:8.4f}  {(v-model)*60:+6.2f}\'')
@@ -290,7 +300,7 @@ for h, m, v in POL_LIMB_SEP:
     t = t_at(h, m)
     mo = get_body('moon', t, location=loc)
     mo_d = apparent_of_date(mo, t)
-    pol_d = apparent_of_date(pollux, t)
+    pol_d = apparent_of_date(pollux.apply_space_motion(new_obstime=t), t)
     sd = moon_semid_deg(mo)
     limb = moon_limb_on_sky(mo_d, pol_d, sd)
     model = limb.separation(pol_d).deg
