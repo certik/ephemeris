@@ -83,14 +83,22 @@ def jacobian(x, t_single: Time, steps=None) -> np.ndarray:
 
 
 def project_state(x):
-    """Clamp state to a physically meaningful region."""
+    """Project state to a physically meaningful region.  Instead of hard
+    clamping ``e`` at 0 (which traps the filter), a negative ``e`` is
+    reflected: negate it and shift ``omega`` by pi (geometrically the
+    same orbit, viewed from the opposite apsis).  This lets the filter
+    pass smoothly through e=0 in either direction."""
     x = x.copy()
     # a > 0, reasonable Moon range
     x[0] = np.clip(x[0], 100_000.0, 1_500_000.0)
-    # e in [0, 0.5]; Moon is ~0.055
-    x[1] = np.clip(x[1], 0.0, 0.5)
-    # i in [0, pi]
-    x[2] = np.clip(x[2], np.radians(0.0), np.radians(60.0))
+    # e reflection through 0
+    if x[1] < 0.0:
+        x[1] = -x[1]
+        x[4] = x[4] + np.pi        # omega -> omega + pi
+        x[5] = x[5] + np.pi        # M0    -> M0 + pi (apsis flipped)
+    x[1] = min(x[1], 0.5)
+    # i in [0, 60 deg] (Moon won't go higher)
+    x[2] = np.clip(x[2], 0.0, np.radians(60.0))
     # angles mod 2*pi
     for k in (3, 4, 5):
         x[k] = x[k] % (2.0 * np.pi)
@@ -191,6 +199,9 @@ def run(n_outer=6, verbose_inner=False):
 
     trace = []
     P = P0.copy()
+    print(f'initial : a={x[0]:8.1f} km  e={x[1]:6.4f}  '
+          f'i={np.degrees(x[2]):5.2f}d  Omega={np.degrees(x[3]):5.1f}d  '
+          f'omega={np.degrees(x[4]):5.1f}d  M0={np.degrees(x[5]):5.1f}d')
     for it in range(n_outer):
         # Anneal measurement noise from loose to tight
         frac = it / max(1, n_outer - 1)
