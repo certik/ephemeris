@@ -23,7 +23,7 @@ import astropy.units as u
 from astropy.time import Time, TimeDelta
 from astropy.coordinates import (
     solar_system_ephemeris, EarthLocation, SkyCoord, get_body,
-    PrecessedGeocentric,
+    PrecessedGeocentric, AltAz,
 )
 from astropy.coordinates.baseframe import NonRotationTransformationWarning
 from astropy.utils.iers import conf as iers_conf
@@ -86,8 +86,21 @@ def equation_of_time_shift_min(date_str: str) -> float:
     return sec / 60.0
 
 
-def of_date(sc: SkyCoord, t: Time) -> SkyCoord:
-    return sc.transform_to(PrecessedGeocentric(equinox=t, obstime=t))
+def _bennett_refraction_deg(alt_deg: float) -> float:
+    """Bennett (1982) mean refraction at 1010 mbar, 10 C; alt in deg."""
+    if alt_deg <= -1.0:
+        return 0.0
+    return (1.0/np.tan(np.radians(alt_deg + 7.31/(alt_deg + 4.4))))/60.0
+
+
+def apparent_of_date(sc: SkyCoord, t: Time) -> SkyCoord:
+    """Topocentric of-date RA/Dec with atmospheric refraction applied
+    (i.e., what Tycho's instruments actually read)."""
+    aa = sc.transform_to(AltAz(obstime=t, location=loc))
+    R = _bennett_refraction_deg(float(aa.alt.deg))
+    app = SkyCoord(alt=(aa.alt.deg + R)*u.deg, az=aa.az.deg*u.deg,
+                   frame=AltAz(obstime=t, location=loc))
+    return app.transform_to(PrecessedGeocentric(equinox=t, obstime=t))
 
 
 def moon_semid_deg(moon_sc: SkyCoord) -> float:
@@ -162,7 +175,7 @@ def residuals_arcmin():
     for h, m, horn, v in MOON_HORN:
         t = astro_hm_corrected(h, m)
         mo = get_body('moon', t, location=loc)
-        mo_d = of_date(mo, t)
+        mo_d = apparent_of_date(mo, t)
         sd = moon_semid_deg(mo)
         dec_model = mo_d.dec.deg + (sd if horn == 'upper' else -sd)
         res.append((v - dec_model)*60)
@@ -170,14 +183,14 @@ def residuals_arcmin():
         t = astro_hm_corrected(h, m)
         mo = get_body('moon', t, location=loc)
         ju = get_body('jupiter', t, location=loc)
-        mo_d = of_date(mo, t); ju_d = of_date(ju, t)
+        mo_d = apparent_of_date(mo, t); ju_d = apparent_of_date(ju, t)
         sd = moon_semid_deg(mo)
         model = (mo_d.ra.deg - sd) - ju_d.ra.deg
         res.append((v - model)*60)
     for h, m, v in ALD_LIMB:
         t = astro_hm_corrected(h, m)
         mo = get_body('moon', t, location=loc)
-        mo_d = of_date(mo, t); ald_d = of_date(aldebaran, t)
+        mo_d = apparent_of_date(mo, t); ald_d = apparent_of_date(aldebaran, t)
         sd = moon_semid_deg(mo)
         model = (mo_d.ra.deg - sd) - ald_d.ra.deg
         res.append((v - model)*60)
@@ -208,7 +221,7 @@ print(' time    horn    Tycho      DE441 center+/-s.d.   error')
 for h, m, horn, v in MOON_HORN:
     t = astro_hm_corrected(h, m)
     mo = get_body('moon', t, location=loc)
-    mo_d = of_date(mo, t)
+    mo_d = apparent_of_date(mo, t)
     sd = moon_semid_deg(mo)
     dec_model = mo_d.dec.deg + (sd if horn == 'upper' else -sd)
     print(f' {fmt_time(h,m)}  {horn:5s}  {v:8.4f}    {dec_model:8.4f}          {fmt_err((v-dec_model)*60)}')
@@ -227,7 +240,7 @@ print(' time    Tycho     DE441     error')
 for h, m, v in JUP_LIMB:
     t = astro_hm_corrected(h, m)
     mo = get_body('moon', t, location=loc); ju = get_body('jupiter', t, location=loc)
-    mo_d = of_date(mo, t); ju_d = of_date(ju, t)
+    mo_d = apparent_of_date(mo, t); ju_d = apparent_of_date(ju, t)
     sd = moon_semid_deg(mo)
     model = (mo_d.ra.deg - sd) - ju_d.ra.deg
     print(f' {fmt_time(h,m)}  {v:8.4f}  {model:8.4f}  {fmt_err((v-model)*60)}')
@@ -237,7 +250,7 @@ print(' time    Tycho     DE441     error')
 for h, m, v in ALD_LIMB:
     t = astro_hm_corrected(h, m)
     mo = get_body('moon', t, location=loc)
-    mo_d = of_date(mo, t); ald_d = of_date(aldebaran, t)
+    mo_d = apparent_of_date(mo, t); ald_d = apparent_of_date(aldebaran, t)
     sd = moon_semid_deg(mo)
     model = (mo_d.ra.deg - sd) - ald_d.ra.deg
     print(f' {fmt_time(h,m)}  {v:8.4f}  {model:8.4f}  {fmt_err((v-model)*60)}')
