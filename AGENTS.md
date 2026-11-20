@@ -288,7 +288,11 @@ to print the comparison. In `blind`, `fromfile` (argument 9) starts the
 final fit from the `BLIND` line in `blind_start.dat`; argument 11 is `-` or
 a comma list of what else to fit: `moonr` (the Moon's radius, otherwise
 1737.4 km), `refr` (strength of refraction), `lat` (Uraniborg's latitude),
-`peryear` (1595 gets its own altitude offset and its own values of those);
+`peryear` (1595 gets its own altitude offset and its own values of those),
+`tycho` (nothing but Tycho's values: for `tycho_obs_tycho.dat`, no aberration
+or J2, a massless Moon, a spherical Earth, Cassini's refraction with its
+height fitted too), `huber` / `tukey` / `noclip` (weighting of the final fit
+instead of rejecting beyond 4 sigma);
 argument 12 is the subset for the final fit: `all`, `y1586`, `y1595`, or
 `moonstar` (Moon readings only where the stars give the time).
 
