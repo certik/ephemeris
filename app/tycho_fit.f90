@@ -2737,6 +2737,9 @@ contains
             bo = bo + w2*Jm(i2, idx2(1:na2))*Jm(i2, 7)
           end do
           do k3 = 1, na2
+            ! the random effects' priors, as in the fit
+            if (prior_tau(idx2(k3)) > 0.0_dp .and. Noo(k3, k3) > 0.0_dp) &
+                Noo(k3, k3) = Noo(k3, k3) + 1.0_dp/prior_tau(idx2(k3))**2
             if (Noo(k3, k3) <= 0.0_dp) then
               Noo(k3, k3) = 1.0_dp; bo(k3) = 0.0_dp
             end if
