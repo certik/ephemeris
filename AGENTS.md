@@ -272,14 +272,23 @@ mkdir -p build/tycho
 gfortran -O3 -march=native -ffree-line-length-none -J build/tycho -o build/tycho/tycho_fit src/constants_mod.f90 app/tycho_fit.f90
 ./tycho_fit tycho_obs_10arcmin.dat jpl_state.dat fit 4
 ```
-Arguments: `<obs> <state> <mode> [clip_sigma] [n_mc] [seed] [noplanets] [noj2]`.
-Modes: `check` (model vs JPL's predictions), `fit` (batch LS + IEKF from a
-perturbed start), `mc` (Monte Carlo on synthetic data), `profile` (χ² against
-a fixed Earth–Sun distance), `kepler` (Moon on a fixed Kepler ellipse),
-`jplfit`/`jplfit0` (fit JPL's own predictions, model bias).
+Arguments: `<obs> <state> <mode> [clip_sigma] [n_mc] [seed] [noplanets|blind] [noj2] [fromjpl] [noclock|clock]`.
+Modes: `blind` (the JPL-free fit on `tycho_obs_blind.dat`: Sun, Earth and
+Moon only, Earth–Moon barycentre elements, orbits built up from ellipses
+fitted to the readings, daytime times and clocks from the model's own Sun;
+`fromjpl` as argument 9 starts its final stage from JPL instead, as an
+optimizer check; `noclock` as argument 10 leaves the daytime clocks as
+written), `check` (model vs JPL's predictions; with `blind` and `clock` it
+also writes the solved moments to `check_times.dat`), `fit` (batch LS +
+IEKF from a perturbed JPL start), `mc` (Monte Carlo on synthetic data),
+`profile` (χ² against a fixed Earth–Sun distance), `kepler` (Moon on a
+fixed Kepler ellipse), `jplfit`/`jplfit0` (fit JPL's own predictions,
+model bias). The JPL state file is read in every mode, but in `blind` only
+to print the comparison.
 
-**Inputs:** `tycho_obs_*arcmin.dat`, `jpl_state.dat`  
-**Output:** log on stdout, `tycho_fit_residuals.dat`. Results and discussion:
+**Inputs:** `tycho_obs_*arcmin.dat` or `tycho_obs_blind.dat`, `jpl_state.dat`  
+**Output:** log on stdout, `tycho_fit_residuals.dat` / `tycho_blind_residuals.dat`
+(run with `GFORTRAN_UNBUFFERED_ALL=1` to follow a long run). Results and discussion:
 `data/fit/README.md` in the `tycho` repository.
 
 ---

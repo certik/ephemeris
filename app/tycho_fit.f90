@@ -39,9 +39,17 @@
 !  synthetic data (JPL + noise with Tycho's scatter, same moments and
 !  kinds of readings) shows how well each parameter can be determined.
 !
+!  Mode "blind" (tycho_obs_blind.dat) uses nothing from JPL: every reading,
+!  times from the star clock or solved with the model's own Sun (local
+!  apparent time, each daytime session's clock) and Moon (transits), signs
+!  and limbs chosen by the model, no planets, the Earth-Moon barycentre's
+!  elements, and orbits built up from ellipses fitted to the readings
+!  (see blind_fit below).  JPL's state is read only for the comparison.
+!
 !  Build and run:
-!    gfortran -O2 -o build/tycho_fit src/constants_mod.f90 app/tycho_fit.f90
-!    build/tycho_fit tycho_obs_2arcmin.dat jpl_state.dat
+!    gfortran -O3 -ffree-line-length-none -J build/tycho -o build/tycho/tycho_fit \
+!        src/constants_mod.f90 app/tycho_fit.f90
+!    build/tycho/tycho_fit tycho_obs_blind.dat jpl_state.dat blind
 ! ═══════════════════════════════════════════════════════════════════════
 module tycho_fit_mod
   use constants_mod
@@ -83,10 +91,33 @@ module tycho_fit_mod
     character(len=4) :: refkind
     real(dp) :: jd, last, M(3,3), sra, sdec, value, jpl, group_err
     integer :: group
+    ! blind files (tycho_obs_blind.dat): how the moment is found
+    !   S true moment (star clock) | A local apparent time lat_h, turned
+    !   into a moment with the model's own Sun | M meridian transit near jd,
+    !   found with the model's own Sun or Moon
+    character(len=1) :: tkind = 'S', sgn = '+'
+    real(dp) :: lat_h = 0.0_dp
+    ! observing session of an A reading (one clock); the clock correction
+    ! (minutes, + = true time later than written) found with the model's
+    ! own Sun; clk = 'x' if the logbook says not to use it for the clock
+    integer :: sess = 0
+    character(len=1) :: clk = '-'
+    real(dp) :: dclock = 0.0_dp
   end type
 
-  type(reading) :: obs(MAXOBS)
-  integer :: nobs = 0
+  type(reading) :: obs(MAXOBS), obs_all(MAXOBS)
+  integer :: nobs = 0, nall = 0
+  ! limb chosen for a reading whose limb is not named (point n or v); kept
+  ! fixed while the Jacobian is formed
+  character(len=1) :: lchoice(MAXOBS) = 'C'
+  logical :: fix_choice = .false.
+  real(dp) :: t_used(MAXOBS) = 0.0_dp ! moment each reading was predicted at (JD TT)
+  integer :: nb_used = 8              ! bodies integrated (3 = Sun, Earth, Moon only)
+  ! Elements 1-7 describe the Earth-Moon barycentre about the Sun (instead
+  ! of the Earth); its orbit is a clean ellipse whatever the Earth-Sun
+  ! distance, while the Earth's own osculating elements carry its monthly
+  ! wobble about the barycentre
+  logical :: emb_param = .false.
   integer :: order(MAXOBS)          ! obs sorted by time
   real(dp) :: epoch_jd
   real(dp) :: obs_xyz(3)            ! observer, geocentric (km), in the frame of date at LAST = 0
@@ -269,8 +300,8 @@ contains
     real(dp) :: rij(3), r2, f
     integer :: i, j
     acc = 0.0_dp
-    do i = 1, NBODY
-      do j = i+1, NBODY
+    do i = 1, nb_used
+      do j = i+1, nb_used
         rij = pos(:,j) - pos(:,i)
         r2 = dot_product(rij, rij)
         f = 1.0_dp/(r2*sqrt(r2))
@@ -341,10 +372,15 @@ contains
     gm_m = mu_em*MOON_EARTH_RATIO/(1.0_dp + MOON_EARTH_RATIO)
     gm_e = mu_em - gm_m
     gm_s = mu_se - gm_e
+    if (emb_param) gm_s = mu_se - mu_em        ! mu_se = GM_sun + GM_earth + GM_moon
     gm(1:3) = [gm_s, gm_e, gm_m]
     call kepler_to_cart(x(7), x(1), x(2), x(3), x(4), x(5), mu_se, rE, vE)
     call kepler_to_cart(x(14), x(8), x(9), x(10), x(11), x(12), mu_em, rM, vM)
     pos(:,1) = sun_state(1:3);    vel(:,1) = sun_state(4:6)
+    if (emb_param) then
+      ! rE, vE are the Earth-Moon barycentre's
+      rE = rE - (gm_m/mu_em)*rM; vE = vE - (gm_m/mu_em)*vM
+    end if
     pos(:,2) = pos(:,1) + rE;     vel(:,2) = vel(:,1) + vE
     pos(:,3) = pos(:,2) + rM;     vel(:,3) = vel(:,2) + vM
     do k = 1, 5
@@ -374,7 +410,48 @@ contains
   end subroutine
 
   ! ── Prediction of one reading (deg) ─────────────────────────────────
-  function predict_one(o, x, rsun, rmoon, vearth) result(p)
+  ! A limb not named in the logbook (point n: nearer or farther, v: upper
+  ! or lower) is the one closer to the reading under this model; the
+  ! choice is recorded in lchoice(i) and kept while fix_choice is set.
+  function predict_one(o, x, rsun, rmoon, vearth, i) result(p)
+    type(reading), intent(in) :: o
+    real(dp), intent(in) :: x(NP), rsun(3), rmoon(3), vearth(3)
+    integer, intent(in) :: i
+    real(dp) :: p, p1, p2
+    type(reading) :: o2
+    character(len=2) :: cand
+    if (o%point /= 'n' .and. o%point /= 'v') then
+      p = predict_pt(o, x, rsun, rmoon, vearth); return
+    end if
+    cand = merge('NF', 'UL', o%point == 'n')
+    o2 = o
+    if (fix_choice) then
+      o2%point = lchoice(i)
+      p = predict_pt(o2, x, rsun, rmoon, vearth); return
+    end if
+    o2%point = cand(1:1); p1 = predict_pt(o2, x, rsun, rmoon, vearth)
+    o2%point = cand(2:2); p2 = predict_pt(o2, x, rsun, rmoon, vearth)
+    if (abs(dresid(o, o%value, p1)) <= abs(dresid(o, o%value, p2))) then
+      p = p1; lchoice(i) = cand(1:1)
+    else
+      p = p2; lchoice(i) = cand(2:2)
+    end if
+  end function
+
+  ! Residual of a reading (arcmin): a sign not printed (sgn ?) is the one
+  ! that fits the prediction
+  function dresid(o, value, p) result(r)
+    type(reading), intent(in) :: o
+    real(dp), intent(in) :: value, p
+    real(dp) :: r, r2
+    r = resid_arcmin(o, value, p)
+    if (o%sgn == '?') then
+      r2 = resid_arcmin(o, -value, p)
+      if (abs(r2) < abs(r)) r = r2
+    end if
+  end function
+
+  function predict_pt(o, x, rsun, rmoon, vearth) result(p)
     type(reading), intent(in) :: o
     real(dp), intent(in) :: x(NP), rsun(3), rmoon(3), vearth(3)
     real(dp) :: p, H, d, sd, Hl, dl, Hr, dr, a, A_az, Hs, ds, sds, Hc, dc, Ho, dov
@@ -458,7 +535,7 @@ contains
       i = order(k)
       if (obs(i)%jd < epoch_jd) cycle
       call propagate(pos, vel, gm, (obs(i)%jd - t)*DAY_S); t = obs(i)%jd
-      pred(i) = predict_one(obs(i), x, pos(:,1) - pos(:,2), pos(:,3) - pos(:,2), vel(:,2))
+      pred(i) = predict_at(i, x, pos, vel, gm)
     end do
     ! backward from the epoch
     pos = pos0; vel = vel0; t = epoch_jd
@@ -466,9 +543,56 @@ contains
       i = order(k)
       if (obs(i)%jd >= epoch_jd) cycle
       call propagate(pos, vel, gm, (obs(i)%jd - t)*DAY_S); t = obs(i)%jd
-      pred(i) = predict_one(obs(i), x, pos(:,1) - pos(:,2), pos(:,3) - pos(:,2), vel(:,2))
+      pred(i) = predict_at(i, x, pos, vel, gm)
     end do
   end subroutine
+
+  ! Prediction of reading i from the state at its (guessed) moment.  For
+  ! tkind A the moment is where the model's own Sun has the hour angle of
+  ! the written local apparent time; for tkind M where the body crosses
+  ! the meridian.  The Sun and Moon are moved to that moment by a
+  ! second-order Taylor step (error < 1 km over an hour).
+  function predict_at(i, x, pos, vel, gm) result(p)
+    integer, intent(in) :: i
+    real(dp), intent(in) :: x(NP), pos(3,NBODY), vel(3,NBODY), gm(NBODY)
+    real(dp) :: p, acc(3,NBODY), rs0(3), vs0(3), as0(3), rm0(3), vm0(3), am0(3), rs(3), rm(3)
+    real(dp) :: dt, H, d, sd, target, rate
+    type(reading) :: o2
+    integer :: it
+    real(dp), parameter :: SID_DEG_PER_S = 360.98564736629_dp/86400.0_dp
+    o2 = obs(i)
+    rs0 = pos(:,1) - pos(:,2); rm0 = pos(:,3) - pos(:,2)
+    if (o2%tkind == 'S') then
+      t_used(i) = o2%jd
+      p = predict_one(o2, x, rs0, rm0, vel(:,2), i); return
+    end if
+    vs0 = vel(:,1) - vel(:,2); vm0 = vel(:,3) - vel(:,2)
+    call accel(pos, gm, acc)
+    as0 = acc(:,1) - acc(:,2); am0 = acc(:,3) - acc(:,2)
+    dt = 0.0_dp
+    do it = 1, 4
+      rs = rs0 + vs0*dt + 0.5_dp*as0*dt**2
+      rm = rm0 + vm0*dt + 0.5_dp*am0*dt**2
+      o2%last = obs(i)%last + SID_DEG_PER_S*dt
+      if (o2%tkind == 'A') then
+        call topo(rs, vel(:,2), o2, H, d, sd, SUN_RADIUS)
+        target = (o2%lat_h + o2%dclock/60.0_dp - 12.0_dp)*15.0_dp; rate = 360.0_dp
+      else if (o2%body == 1) then
+        call topo(rs, vel(:,2), o2, H, d, sd, SUN_RADIUS)
+        target = 0.0_dp; rate = 360.0_dp
+      else
+        call topo(rm, vel(:,2), o2, H, d, sd, MOON_RADIUS)
+        target = 0.0_dp; rate = 347.8_dp
+      end if
+      dt = dt + wrap180(target - H)/rate*86400.0_dp
+    end do
+    rs = rs0 + vs0*dt + 0.5_dp*as0*dt**2
+    rm = rm0 + vm0*dt + 0.5_dp*am0*dt**2
+    o2%last = obs(i)%last + SID_DEG_PER_S*dt
+    o2%jd = obs(i)%jd + dt/86400.0_dp
+    t_used(i) = o2%jd
+    p = predict_one(o2, x, rs, rm, vel(:,2), i)
+  end function
 
   function resid_arcmin(o, value, p) result(r)
     type(reading), intent(in) :: o
@@ -482,7 +606,7 @@ contains
   ! ── Input ───────────────────────────────────────────────────────────
   subroutine read_obs(fname)
     character(len=*), intent(in) :: fname
-    integer :: u, ios, i, j, k, tmp
+    integer :: u, ios, k
     character(len=1024) :: line
     character(len=1) :: b
     type(reading) :: o
@@ -502,11 +626,31 @@ contains
       o%M = transpose(reshape(m9, [3, 3]))
       o%group_err = err
       o%group = (merge(0, 1, o%year == 1586))*2*NQ + (o%body - 1)*NQ + qindex(o%qty)
+      ! blind files carry three more columns: tkind lat_h sgn
+      o%tkind = 'S'; o%lat_h = 0.0_dp; o%sgn = '+'; o%sess = 0; o%clk = '-'; o%dclock = 0.0_dp
+      read(line, *, iostat=ios) o%id, o%year, b, o%qty, o%point, o%refkind, o%refpoint, &
+          o%jd, o%last, m9, o%sra, o%sdec, o%value, o%jpl, err, o%tkind, o%lat_h, o%sgn, o%sess, o%clk
+      if (ios /= 0) then
+        o%sess = 0; o%clk = '-'
+        read(line, *, iostat=ios) o%id, o%year, b, o%qty, o%point, o%refkind, o%refpoint, &
+            o%jd, o%last, m9, o%sra, o%sdec, o%value, o%jpl, err, o%tkind, o%lat_h, o%sgn
+        if (ios /= 0) then
+          o%tkind = 'S'; o%lat_h = 0.0_dp; o%sgn = '+'
+        end if
+      end if
       nobs = nobs + 1
       obs(nobs) = o
     end do
     close(u)
+    nall = nobs
+    obs_all(1:nall) = obs(1:nobs)
+    call sort_order()
+    k = 0
+  end subroutine
+
+  subroutine sort_order()
     ! sort by time (insertion sort on an index)
+    integer :: i, j, tmp
     do i = 1, nobs
       order(i) = i
     end do
@@ -518,7 +662,50 @@ contains
       end do
       order(j+1) = tmp
     end do
-    k = 0
+  end subroutine
+
+  ! Work on the readings of a time window only (body 0 = both)
+  subroutine set_window(t1, t2, body)
+    real(dp), intent(in) :: t1, t2
+    integer, intent(in) :: body
+    integer :: i
+    nobs = 0
+    do i = 1, nall
+      if (obs_all(i)%jd < t1 .or. obs_all(i)%jd > t2) cycle
+      if (body /= 0 .and. obs_all(i)%body /= body) cycle
+      nobs = nobs + 1
+      obs(nobs) = obs_all(i)
+    end do
+    call sort_order()
+  end subroutine
+
+  ! Move the parameter vector to another epoch (osculating elements there)
+  subroutine transfer_epoch(x, tnew)
+    real(dp), intent(inout) :: x(NP)
+    real(dp), intent(in) :: tnew
+    real(dp) :: pos(3,NBODY), vel(3,NBODY), gm(NBODY), mu_se, mu_em, a, e, inc, O, w, M
+    call initial_state(x, pos, vel, gm)
+    call propagate(pos, vel, gm, (tnew - epoch_jd)*DAY_S)
+    call state_to_elements(pos, vel, gm, x)
+    epoch_jd = tnew
+  end subroutine
+
+  ! Osculating elements (in the current parametrization) of a state
+  subroutine state_to_elements(pos, vel, gm, x)
+    real(dp), intent(in) :: pos(3,NBODY), vel(3,NBODY), gm(NBODY)
+    real(dp), intent(inout) :: x(NP)
+    real(dp) :: mu_se, mu_em, a, e, inc, O, w, M, rb(3), vb(3)
+    mu_se = gm(1) + gm(2); mu_em = gm(2) + gm(3)
+    rb = pos(:,2); vb = vel(:,2)
+    if (emb_param) then
+      mu_se = gm(1) + gm(2) + gm(3)
+      rb = (gm(2)*pos(:,2) + gm(3)*pos(:,3))/mu_em
+      vb = (gm(2)*vel(:,2) + gm(3)*vel(:,3))/mu_em
+    end if
+    call cart_to_kepler(rb - pos(:,1), vb - vel(:,1), mu_se, a, e, inc, O, w, M)
+    x(1:7) = [e, inc, O, w, M, sqrt(mu_se/a**3)*DAY_S, a]
+    call cart_to_kepler(pos(:,3) - pos(:,2), vel(:,3) - vel(:,2), mu_em, a, e, inc, O, w, M)
+    x(8:14) = [e, inc, O, w, M, sqrt(mu_em/a**3)*DAY_S, a]
   end subroutine
 
   subroutine read_state(fname, x_true)
@@ -646,9 +833,10 @@ contains
     integer :: k, i
     call predict_all(x, p0)
     do i = 1, nobs
-      r0(i) = resid_arcmin(obs(i), values(i), p0(i))
+      r0(i) = dresid(obs(i), values(i), p0(i))
     end do
     J = 0.0_dp
+    fix_choice = .true.          ! the same limbs for the perturbed orbits
     do k = 1, NP
       if (.not. active(k)) cycle
       h = fd_step(x, k)
@@ -661,6 +849,7 @@ contains
         J(i, k) = resid_arcmin(obs(i), pp(i), pm(i))/(2.0_dp*h)*pscale(x, k)   ! d(prediction)/d(scaled param), arcmin
       end do
     end do
+    fix_choice = .false.
   end subroutine
 
   ! ── Symmetric positive-definite solve (Cholesky) ────────────────────
@@ -743,18 +932,20 @@ contains
           call chol_solve(A, b, s, ok)
           if (.not. ok .and. verbose) print '(A,17ES10.2)', '   singular; diag(N) =', (N(idx(k),idx(k)), k = 1, na)
           dx = 0.0_dp
+          ! at most 20 natural units per step (0.2 in e, 11 deg, 20 % in a)
+          if (ok .and. maxval(abs(s)) > 20.0_dp) s = s*20.0_dp/maxval(abs(s))
           if (ok) dx(idx(1:na)) = s
           do k = 1, NP
             dx(k) = dx(k)*pscale(x, k)
           end do
         end block
         xn = x + dx
-        xn(1) = max(1.0d-6, min(0.5_dp, xn(1))); xn(8) = max(1.0d-6, min(0.5_dp, xn(8)))
+        call normalize_elements(xn)
         call predict_all(xn, pn)
         chi2n = 0.0_dp
         do i = 1, nobs
           if (.not. use(i)) cycle
-          rn(i) = resid_arcmin(obs(i), values(i), pn(i))
+          rn(i) = dresid(obs(i), values(i), pn(i))
           chi2n = chi2n + rn(i)**2/sigma_g(obs(i)%group)**2
         end do
         if (ok .and. chi2n < chi2) then
@@ -793,15 +984,113 @@ contains
     rms = 0.0_dp; k = 0
     do i = 1, nobs
       if (.not. use(i)) cycle
-      rms = rms + resid_arcmin(obs(i), values(i), pn(i))**2; k = k + 1
+      rms = rms + dresid(obs(i), values(i), pn(i))**2; k = k + 1
     end do
     rms = sqrt(rms/max(k, 1))
     last_chi2 = 0.0_dp
     do i = 1, nobs
-      if (use(i)) last_chi2 = last_chi2 + (resid_arcmin(obs(i), values(i), pn(i))/sigma_g(obs(i)%group))**2
+      if (use(i)) last_chi2 = last_chi2 + (dresid(obs(i), values(i), pn(i))/sigma_g(obs(i)%group))**2
     end do
     Ninv = 0.0_dp
     deallocate(J, r)
+  end subroutine
+
+  ! ── Clock of each daytime session from the model's own Sun ──────────
+  ! Tycho's local apparent time comes from his clock.  Where no star fixes
+  ! the true time, the Sun's hour angles, altitudes and azimuths read in
+  ! the same session do (as Tycho himself corrected his clocks): the clock
+  ! error that cancels each one is residual / (rate of change with time);
+  ! a reading takes the median of those within 45 minutes (at least
+  ! three), else of its session's within 1.5 hours.  The correction is
+  ! added to what is already applied, so calling this repeatedly between
+  ! fits converges.
+  subroutine update_clocks(x, nsess, medcorr)
+    real(dp), intent(in) :: x(NP)
+    integer, intent(out) :: nsess
+    real(dp), intent(out) :: medcorr
+    real(dp) :: p0(nobs), p1(nobs), rate, off(nobs), corr(nobs), tmp(nobs), cand(nobs), cj(nobs)
+    logical :: isclk(nobs)
+    integer :: i, j, nc, ncand, ns
+    call predict_all(x, p0)
+    do i = 1, nobs
+      if (obs(i)%tkind == 'A') obs(i)%dclock = obs(i)%dclock + 1.0_dp
+    end do
+    call predict_all(x, p1)
+    do i = 1, nobs
+      if (obs(i)%tkind == 'A') obs(i)%dclock = obs(i)%dclock - 1.0_dp
+    end do
+    isclk = .false.
+    do i = 1, nobs
+      if (obs(i)%tkind /= 'A' .or. obs(i)%sess == 0 .or. obs(i)%body /= 1 .or. obs(i)%clk == 'x') cycle
+      if (trim(obs(i)%qty) /= 'HA' .and. trim(obs(i)%qty) /= 'ALT' .and. trim(obs(i)%qty) /= 'AZ') cycle
+      if (trim(obs(i)%qty) == 'ALT' .and. obs(i)%value < 5.0_dp) cycle
+      rate = resid_arcmin(obs(i), p1(i), p0(i))          ! arcmin per minute of time
+      if (abs(rate) < 3.0_dp) cycle
+      off(i) = dresid(obs(i), obs(i)%value, p0(i))/rate
+      if (abs(off(i)) < 90.0_dp) isclk(i) = .true.
+    end do
+    ! as in compare_jpl.py: in a session with hour angles (read on the
+    ! armillae, a direct measure of time) only those set the clock;
+    ! altitudes and azimuths depend on the quadrant's zero point and on
+    ! refraction
+    do i = 1, nobs
+      if (.not. isclk(i) .or. trim(obs(i)%qty) == 'HA') cycle
+      do j = 1, nobs
+        if (isclk(j) .and. obs(j)%sess == obs(i)%sess .and. trim(obs(j)%qty) == 'HA') then
+          isclk(i) = .false.; exit
+        end if
+      end do
+    end do
+    corr = 0.0_dp; nc = 0
+    do j = 1, nobs
+      if (obs(j)%tkind /= 'A' .or. obs(j)%sess == 0) cycle
+      ncand = 0
+      do i = 1, nobs
+        if (isclk(i) .and. obs(i)%sess == obs(j)%sess .and. abs(obs(i)%jd - obs(j)%jd)*24.0_dp <= 0.75_dp) then
+          ncand = ncand + 1; cand(ncand) = off(i)
+        end if
+      end do
+      if (ncand < 3) then
+        ncand = 0
+        do i = 1, nobs
+          if (isclk(i) .and. obs(i)%sess == obs(j)%sess .and. abs(obs(i)%jd - obs(j)%jd)*24.0_dp <= 1.5_dp) then
+            ncand = ncand + 1; cand(ncand) = off(i)
+          end if
+        end do
+      end if
+      if (ncand == 0) cycle
+      corr(j) = median(cand(1:ncand))
+      nc = nc + 1; cj(nc) = abs(corr(j))
+    end do
+    do j = 1, nobs
+      obs(j)%dclock = obs(j)%dclock + corr(j)
+    end do
+    ns = 0
+    do i = 1, nobs
+      if (obs(i)%sess > ns) ns = obs(i)%sess
+    end do
+    nsess = nc
+    medcorr = 0.0_dp
+    if (nc > 0) medcorr = median(cj(1:nc))
+    tmp = 0.0_dp
+  end subroutine
+
+  ! A step through e = 0 is the same orbit with the perihelion on the other
+  ! side: (-e, w, M) = (e, w + pi, M + pi).  A negative inclination likewise
+  ! is (|i|, Omega + pi, w + pi).
+  subroutine normalize_elements(x)
+    real(dp), intent(inout) :: x(NP)
+    integer :: b
+    do b = 0, 7, 7
+      if (x(1+b) < 0.0_dp) then
+        x(1+b) = -x(1+b); x(4+b) = x(4+b) + PI; x(5+b) = x(5+b) + PI
+      end if
+      x(1+b) = max(1.0d-7, min(0.5_dp, x(1+b)))
+      if (x(2+b) < 0.0_dp) then
+        x(2+b) = -x(2+b); x(3+b) = x(3+b) + PI; x(4+b) = x(4+b) + PI
+      end if
+      x(3+b) = modulo(x(3+b), TAU); x(4+b) = modulo(x(4+b), TAU); x(5+b) = modulo(x(5+b), TAU)
+    end do
   end subroutine
 
   ! ── Iterated extended Kalman filter: sequential measurement updates
@@ -843,7 +1132,7 @@ contains
       do k = 1, NP
         x(k) = xr(k) + xs(k)*pscale(xr, k)
       end do
-      x(1) = max(1.0d-6, min(0.5_dp, x(1))); x(8) = max(1.0d-6, min(0.5_dp, x(8)))
+      call normalize_elements(x)
       print '(A,I3,A,ES10.3,A,F14.1)', '   EKF pass', it, '   largest scaled update', maxval(abs(xs)), &
           '   a_E', x(7)
       do k = 1, NP
@@ -894,6 +1183,12 @@ program tycho_fit
   k = minloc([(abs(obs(i)%jd - epoch_jd), i = 1, nobs)], 1)
   earth_pole = obs(k)%M(3,:)
   call get_command_argument(8, arg); if (trim(arg) == 'noj2') use_j2 = .false.
+  call get_command_argument(7, arg)
+  if (trim(mode) == 'blind' .or. trim(arg) == 'blind') then
+    ! nothing from JPL in the model: Sun, Earth and Moon only, the Sun
+    ! starting at rest at the origin
+    nb_used = 3; use_planets = .false.; sun_state = 0.0_dp
+  end if
   allocate(pred(nobs), values(nobs), synth(nobs), use(nobs))
   print '(A,I6,A,A,A,A)', ' Readings: ', nobs, '  from ', trim(obs_file), '   mode ', trim(mode)
   print '(A,F12.3,A,F5.1,A,L2)', ' Epoch (JD TDB): ', epoch_jd, '   clip (sigma, 0 = none): ', clip, &
@@ -905,6 +1200,24 @@ program tycho_fit
   select case (trim(mode))
 
   case ('check')
+    call get_command_argument(10, arg)
+    if (trim(arg) == 'clock') then
+      do k = 1, 3
+        call update_clocks(x_true, n, r)
+      end do
+      call predict_all(x_true, pred)
+      print '(A,I6,A,F8.3,A)', ' session clocks from the (JPL) Sun:', n, ' readings, last median change', r, ' min'
+    end if
+    block
+      integer :: un
+      open(newunit=un, file='check_times.dat', status='replace')
+      write(un, '(A)') '# id tkind jd_used dclock_min model_deg jpl_deg value_deg'
+      do i = 1, nobs
+        write(un, '(A12,1X,A1,F18.8,F10.3,3F14.7)') obs(i)%id, obs(i)%tkind, t_used(i), obs(i)%dclock, pred(i), &
+            obs(i)%jpl, obs(i)%value
+      end do
+      close(un)
+    end block
     print '(/A)', ' Model check: this program with the JPL orbits vs. compare_jpl.py (JPL DE441)'
     print '(A)', '    group               n    rms(model-JPL)   rms(Tycho-JPL)'
     do g = 1, NG
@@ -913,7 +1226,7 @@ program tycho_fit
         if (obs(i)%group /= g) cycle
         n = n + 1
         gn(1) = gn(1) + resid_arcmin(obs(i), pred(i), obs(i)%jpl)**2
-        gn(2) = gn(2) + resid_arcmin(obs(i), obs(i)%value, obs(i)%jpl)**2
+        gn(2) = gn(2) + dresid(obs(i), obs(i)%value, obs(i)%jpl)**2
       end do
       if (n > 0) print '(4X,A,I6,F12.2,A,F12.2,A)', group_name(g), n, sqrt(gn(1)/n)*60, '"', sqrt(gn(2)/n), "'"
     end do
@@ -955,7 +1268,7 @@ program tycho_fit
     rms = 0.0_dp; n = 0; r = 0.0_dp
     do i = 1, nobs
       if (.not. use(i)) cycle
-      gn(1) = resid_arcmin(obs(i), values(i), pred(i))
+      gn(1) = dresid(obs(i), values(i), pred(i))
       rms = rms + gn(1)**2; r = r + (gn(1)/sigma_g(obs(i)%group))**2; n = n + 1
     end do
     print '(A,F8.3,A,F12.2)', '   rms residual ', sqrt(rms/n), "'   chi2 ", r
@@ -992,6 +1305,9 @@ program tycho_fit
     print '(A,F8.3,A)', '   rms residual (model vs JPL DE441) ', rms*60, '"'
     call report(' Fit to JPL DE441''s own predictions (bias of the 3-body model)', x, sig, x_true)
 
+  case ('blind')
+    call blind_fit()
+
   case ('kepler')
     ! the Moon on a fixed Kepler ellipse about the Earth (no Sun)
     kepler_moon = .true.
@@ -1003,6 +1319,352 @@ program tycho_fit
   end select
 
 contains
+
+  ! ═══ Blind fit: Tycho's readings only, nothing from JPL ═══════════════
+  ! The orbits are built up from the readings themselves:
+  !   1. the Sun: a Kepler ellipse fitted to all Sun readings, from a
+  !      circle (eccentricity 0.02, 8 starting longitudes); the year of the
+  !      Julian calendar and the obliquity from the extreme declinations
+  !      only start it;
+  !   2. the Moon: a Kepler ellipse fitted to the ten days of 1586 with the
+  !      most Moon readings, from 72 starts (node and longitude every 60 and
+  !      30 deg, 5 deg to the fitted ecliptic, the sidereal month and the
+  !      distance of 60 Earth radii known since antiquity);
+  !   3. the Moon with the Sun's pull (N-body), the window widened step by
+  !      step to all of 1586;
+  !   4. the Earth-Sun distance: scanned from Tycho's 1150 Earth radii up,
+  !      everything else refitted at each step;
+  !   5. all readings of 1586 and 1595 together, every parameter free,
+  !      at the epoch 1590-07-01; outliers rejected from the fit's own
+  !      residuals (4 sigma, robust scatter per kind of reading).
+  ! JPL's orbits (x_true) are read only to print the comparison at the end.
+  subroutine blind_fit()
+    real(dp) :: xb(NP), xt(NP), xbest(NP), xk(NP), score, best, tc, epoch0, half, inc, Om, ob
+    real(dp) :: nE(3), Xv(3), Yv(3), nm(3), sc_scan(40), cv(NP,NP), rr, sgv(NP)
+    real(dp), allocatable :: dec(:)
+    logical :: act(NP)
+    integer :: k1, k2, nd, nw, nbest, kk
+    real(dp), parameter :: RE = 6378.137_dp
+    real(dp), parameter :: HALVES(7) = [5.0_dp, 10.0_dp, 20.0_dp, 40.0_dp, 80.0_dp, 160.0_dp, 400.0_dp]
+    real(dp), parameter :: AE_RE(14) = [1150.0_dp, 2000.0_dp, 4000.0_dp, 7000.0_dp, 10000.0_dp, 13000.0_dp, &
+        16000.0_dp, 19000.0_dp, 22000.0_dp, 25000.0_dp, 30000.0_dp, 40000.0_dp, 60000.0_dp, 100000.0_dp]
+    real(dp), parameter :: PROF(11) = [0.80_dp, 0.85_dp, 0.90_dp, 0.95_dp, 0.98_dp, 1.0_dp, 1.02_dp, 1.05_dp, &
+                                       1.10_dp, 1.15_dp, 1.20_dp]
+
+    epoch0 = epoch_jd
+    print '(/A)', ' BLIND FIT: Tycho''s readings only.  No JPL orbit, planet, time, sign, limb or'
+    print '(A)',  ' selection; JPL is printed only for comparison at the end.'
+    print '(A)',  ' Elements 1-7 are those of the Earth-Moon barycentre about the Sun.'
+    ! JPL's orbits in the same parametrization, for the comparison only
+    block
+      real(dp) :: pos(3,NBODY), vel(3,NBODY), gm(NBODY)
+      real(dp), allocatable :: p1(:), p2(:)
+      emb_param = .false.
+      call initial_state(x_true, pos, vel, gm)
+      emb_param = .true.
+      xt = x_true
+      call state_to_elements(pos, vel, gm, xt)
+      allocate(p1(nobs), p2(nobs))
+      emb_param = .false.; call predict_all(x_true, p1)
+      emb_param = .true.;  call predict_all(xt, p2)
+      print '(A,ES10.2,A)', ' (check of the barycentre elements: largest change of a prediction ', &
+          maxval(abs(p1 - p2))*3600.0_dp, '")'
+    end block
+
+    ! Diagnostic only (argument 9 = fromjpl): skip the build-up and start the
+    ! final fit from JPL's orbits, to see whether the blind fit found the
+    ! lowest chi2 of these readings
+    call get_command_argument(9, arg)
+    if (trim(arg) == 'fromjpl') then
+      print '(A)', ' DIAGNOSTIC: final fit started from JPL''s orbits (optimizer check, not a result)'
+      xb = xt; xk = xt
+      go to 500
+    end if
+
+    ! ── 1. the Sun ──
+    allocate(dec(nall)); nd = 0
+    do k1 = 1, nall
+      ! the Sun's meridian altitudes: half their yearly range is the obliquity
+      if (obs_all(k1)%body == 1 .and. trim(obs_all(k1)%qty) == 'ALTM') then
+        nd = nd + 1; dec(nd) = obs_all(k1)%value
+      end if
+    end do
+    call sort_vals(dec(1:nd))
+    ob = 0.5_dp*(dec(max(1, nint(0.98_dp*nd))) - dec(max(1, nint(0.02_dp*nd))))
+    print '(A,I5,A,F8.3,A)', '   Sun meridian altitudes:', nd, ';  half their range (2-98 %):', ob, ' deg'
+    xb = 0.0_dp
+    xb(1:7) = [0.02_dp, ob*DEG2RAD, 0.0_dp, 0.0_dp, 0.0_dp, TAU/365.25_dp, 1150.0_dp*RE]
+    xb(8:14) = [0.05_dp, ob*DEG2RAD, 0.0_dp, 0.0_dp, 0.0_dp, TAU/27.3217_dp, 60.0_dp*RE]
+    call set_window(-1.0d30, 1.0d30, 1)
+    print '(A,I6,A)', '   1. Sun:', nobs, ' Sun readings.  (a) a circle from 12 starting longitudes'
+    act = .false.; act(2:3) = .true.; act(5:6) = .true.; act(15:17) = .true.
+    best = huge(1.0_dp)
+    do kk = 0, 11
+      xk = xb; xk(1) = 1.0d-7; xk(5) = kk*30.0_dp*DEG2RAD
+      call run_fit(xk, act, 5.0_dp, score, nw)
+      print '(A,I4,A,F10.3,A,I6,A,F9.4,A,F9.3)', '      start M0 =', kk*30, ' deg:  median |resid| ', score, &
+          "'  used", nw, '   i', xk(2)*RAD2DEG, '   longitude', modulo(xk(3) + xk(4) + xk(5), TAU)*RAD2DEG
+      if (score < best) then
+        best = score; xbest = xk
+      end if
+    end do
+    xb = xbest
+    print '(A)', '      (b) the ellipse: eccentricity released from 4 perihelion directions'
+    act(1) = .true.; act(4) = .true.
+    best = huge(1.0_dp)
+    do kk = 0, 3
+      xk = xb; xk(1) = 0.02_dp; xk(4) = kk*90.0_dp*DEG2RAD; xk(5) = xb(4) + xb(5) - xk(4)
+      call run_fit(xk, act, 5.0_dp, score, nw)
+      print '(A,I4,A,F10.3,A,I6,A,F8.5,A,F9.4)', '      start w =', kk*90, ' deg:  median |resid| ', score, &
+          "'  used", nw, '   e', xk(1), '   i', xk(2)*RAD2DEG
+      if (score < best) then
+        best = score; xbest = xk
+      end if
+    end do
+    xb = xbest
+    print '(A,F8.3,A,F10.5,A,F9.5,A,F9.4,A)', '   Sun fitted: median |resid| ', best, "'   e ", xb(1), &
+        '   i ', xb(2)*RAD2DEG, ' deg   year ', TAU/xb(6), ' d'
+
+    ! ── 2. the Moon: Kepler ellipse to the densest ten days of 1586 ──
+    nbest = 0; tc = 0.0_dp
+    do k1 = 1, nall
+      if (obs_all(k1)%body /= 2 .or. obs_all(k1)%year /= 1586) cycle
+      nw = count([(obs_all(k2)%body == 2 .and. obs_all(k2)%jd >= obs_all(k1)%jd .and. &
+                   obs_all(k2)%jd <= obs_all(k1)%jd + 10.0_dp, k2 = 1, nall)])
+      if (nw > nbest) then
+        nbest = nw; tc = obs_all(k1)%jd + 5.0_dp
+      end if
+    end do
+    tc = anint(tc)
+    call transfer_epoch(xb, tc)
+    inc = xb(2); Om = xb(3)
+    nE = [sin(inc)*sin(Om), -sin(inc)*cos(Om), cos(inc)]
+    Xv = [cos(Om), sin(Om), 0.0_dp]
+    Yv = [nE(2)*Xv(3) - nE(3)*Xv(2), nE(3)*Xv(1) - nE(1)*Xv(3), nE(1)*Xv(2) - nE(2)*Xv(1)]
+    kepler_moon = .true.
+    call set_window(tc - 5.0_dp, tc + 5.0_dp, 2)
+    print '(/A,F12.2,A,I5,A)', '   2. Moon: Kepler ellipse, 10 days around JD', tc, ' (', nobs, &
+        ' Moon readings): (a) a circle from 72 starts'
+    act = .false.; act(9:10) = .true.; act(12) = .true.
+    best = huge(1.0_dp)
+    do k1 = 0, 5
+      do k2 = 0, 11
+        nm = cos(5.0_dp*DEG2RAD)*nE + sin(5.0_dp*DEG2RAD)*(sin(k1*60.0_dp*DEG2RAD)*Xv - cos(k1*60.0_dp*DEG2RAD)*Yv)
+        xk = xb
+        xk(8:14) = [1.0d-7, acos(nm(3)), modulo(atan2(nm(1), -nm(2)), TAU), 0.0_dp, k2*30.0_dp*DEG2RAD, &
+                    TAU/27.3217_dp, 60.0_dp*RE]
+        call run_fit(xk, act, 5.0_dp, score, nw)
+        if (score < best) then
+          best = score; xbest = xk
+        end if
+      end do
+    end do
+    xb = xbest
+    print '(A,F9.3,A)', '      best circle: median |resid| ', best, "'"
+    print '(A)', '      (b) the ellipse from 4 perigee directions'
+    act(8) = .true.; act(11) = .true.
+    best = huge(1.0_dp)
+    do kk = 0, 3
+      xk = xb; xk(8) = 0.05_dp; xk(11) = kk*90.0_dp*DEG2RAD; xk(12) = xb(11) + xb(12) - xk(11)
+      call run_fit(xk, act, 5.0_dp, score, nw)
+      if (score < best) then
+        best = score; xbest = xk
+      end if
+    end do
+    xb = xbest
+    print '(A,F9.3,A,F8.4,A,F8.3,A)', '      best start: median |resid| ', best, "'   e ", xb(8), &
+        '   i(equator) ', xb(9)*RAD2DEG, ' deg'
+
+    ! ── 3. the Moon with the Sun's pull, widening the window over 1586 ──
+    kepler_moon = .false.
+    print '(/A)', '   3. Moon, N-body, window widened over 1586'
+    do kk = 1, size(HALVES)
+      half = HALVES(kk)
+      act = .false.; act(8:12) = .true.
+      if (half >= 20.0_dp) act(13) = .true.
+      if (half >= 40.0_dp) act(14) = .true.
+      call set_window(tc - half, tc + half, 2)
+      call run_fit(xb, act, 5.0_dp, score, nw)
+      print '(A,F6.0,A,I5,A,F9.3,A,I5,A,F9.5,A,F10.0,A)', '      +-', half, ' d:', nobs, &
+          ' readings  median |resid| ', score, "'  used", nw, '  month ', TAU/xb(13), ' d  a_M ', xb(14), ' km'
+    end do
+
+    ! ── 4. the Earth-Sun distance, from all of 1586 ──
+    call set_window(-1.0d30, epoch0, 0)
+    act = .true.; act(7) = .false.
+    print '(/A,I5,A)', '   4. Earth-Sun distance scanned on all of 1586 (', nobs, &
+        ' readings; everything else refitted)'
+    best = huge(1.0_dp)
+    do kk = 1, size(AE_RE)
+      xb(7) = AE_RE(kk)*RE
+      call run_fit(xb, act, 5.0_dp, score, nw)
+      sc_scan(kk) = score
+      print '(A,F9.0,A,F7.2,A,F9.4,A,I6)', '      a_E =', AE_RE(kk), ' Earth radii (', xb(7)/1.0d6, &
+          ' M km):  median |resid| ', score, "'  used", nw
+      if (score < best) then
+        best = score; xbest = xb
+      end if
+    end do
+    xb = xbest
+    act = .true.
+    call run_fit(xb, act, 5.0_dp, score, nw)
+    print '(A,F8.2,A,F9.4,A)', '      free: a_E = ', xb(7)/1.0d6, ' M km   median |resid| ', score, "'"
+    xk = xb                                   ! the 1586 solution (start of the Kalman filter below)
+
+    ! ── 5. 1586 and 1595 together, epoch 1590-07-01 ──
+500 continue
+    call transfer_epoch(xb, epoch0)
+    call transfer_epoch(xk, epoch0)
+    call set_window(-1.0d30, 1.0d30, 0)
+    print '(/A,I6,A)', '   5. All readings (', nobs, '), 1586 and 1595 together'
+    block
+      real(dp), allocatable :: v(:), pr(:)
+      logical, allocatable :: u(:)
+      real(dp) :: r1586, r1595
+      allocate(v(nobs), pr(nobs), u(nobs))
+      v = obs(1:nobs)%value
+      call predict_all(xb, pr)
+      call med_resid_year(v, pr, r1586, r1595)
+      print '(A,F9.3,A,F9.3,A)', '      1586 solution predicts 1586 to ', r1586, "' and 1595 to ", r1595, &
+          "' (median |resid|)"
+      act = .true.; act(7) = .false.
+      call run_fit(xb, act, 5.0_dp, score, nw)
+      print '(A,F9.4,A,I6)', '      a_E fixed:  median |resid| ', score, "'  used", nw
+      act = .true.
+      call fit_lm(xb, v, act, 4.0_dp, cv, u, rms, .true.)
+      print '(A,F14.1,A,F8.3,A,F12.2)', '      without clock correction of the daytime sessions: a_E ', xb(7), &
+          ' km   rms ', rms, "'   chi2 ", last_chi2
+      ! the clocks of the daytime sessions from the model's own Sun
+      ! (argument 10 = noclock leaves Tycho's clock times as written)
+      call get_command_argument(10, arg)
+      if (trim(arg) /= 'noclock') then
+        do kk = 1, 4
+          call update_clocks(xb, nw, score)
+          call fit_lm(xb, v, act, 4.0_dp, cv, u, rms, .false.)
+          print '(A,I2,A,I5,A,F8.2,A,F14.1,A,F8.3,A,F12.2)', '      session clocks, pass', kk, ':', nw, &
+              ' readings corrected, median |correction| ', score, ' min;  a_E ', xb(7), ' km  rms ', rms, &
+              "'  chi2 ", last_chi2
+        end do
+      end if
+      do kk = 1, NP
+        sgv(kk) = sqrt(max(cv(kk,kk), 0.0_dp))
+      end do
+      print '(A,F8.3,A,I6,A,I6,A,F12.2)', '   rms residual ', rms, "'   readings used ", count(u), ' of ', nobs, &
+          '   chi2 ', last_chi2
+      call report(" BLIND FIT (nothing from JPL; JPL column for comparison only)", xb, sgv, xt)
+      call print_sigmas()
+      call write_blind_residuals(xb, u, v)
+      write(*, '(A,17ES20.11)') ' BLIND ', xb
+      write(*, '(A,17ES20.11)') ' BLINDSIG ', sgv
+
+      ! χ² profile in a_E around the blind solution (weights and readings fixed)
+      block
+        real(dp) :: sgf(NG), chi0, xp(NP)
+        logical :: actp(NP)
+        sgf = sigma_g; chi0 = last_chi2
+        freeze_sigma = .true.; freeze_use = .true.
+        actp = .true.; actp(7) = .false.
+        print '(/A)', '   chi2 against a_E (all else refitted; weights of the blind fit)'
+        print '(A)', '     a_E/fit      a_E (km)        chi2     dchi2    rms(arcmin)'
+        do kk = 1, 11
+          sigma_g = sgf
+          xp = xb; xp(7) = xb(7)*PROF(kk)
+          call fit_lm(xp, v, actp, 4.0_dp, cv, u, rr, .false.)
+          print '(F9.3,F16.1,F12.3,F10.3,F10.3,I7)', xp(7)/xb(7), xp(7), last_chi2, last_chi2 - chi0, rr, count(u)
+        end do
+        sigma_g = sgf
+        freeze_sigma = .false.; freeze_use = .false.
+
+        ! Kalman filter started from the 1586-only solution, same weights
+        print '(/A)', ' Iterated EKF (F = I, Q = 0) on all readings, started from the 1586 solution'
+        call fit_lm(xb, v, act, 4.0_dp, cv, u, rr, .false.)   ! the readings and weights to use
+        xp = xk
+        sigma_prior = [0.05_dp, 0.05_dp, 0.05_dp, 0.5_dp, 0.5_dp, 1.0d-4, 1.0d7, &
+                       0.05_dp, 0.05_dp, 0.05_dp, 0.5_dp, 0.5_dp, 1.0d-2, 4.0d4, 5.0_dp, 5.0_dp, 5.0_dp]
+        call fit_iekf(xp, v, act, u, sigma_prior, 30, P)
+        call predict_all(xp, pr)
+        rr = 0.0_dp
+        do kk = 1, nobs
+          if (u(kk)) rr = rr + (dresid(obs(kk), v(kk), pr(kk))/sigma_g(obs(kk)%group))**2
+        end do
+        do kk = 1, NP
+          sgv(kk) = sqrt(max(P(kk,kk), 0.0_dp))
+        end do
+        print '(A,F12.2,A,F12.2)', '   chi2 ', rr, '   (batch least squares ', last_chi2, ')'
+        call report(' Iterated EKF from the 1586 solution (filter 1-sigma)', xp, sgv, xt)
+        write(*, '(A,17ES20.11)') ' BLINDEKF ', xp
+      end block
+    end block
+  end subroutine
+
+  subroutine run_fit(xr, act, clp, score, nused)
+    ! fit on the current window; score = median |residual| over all its readings
+    real(dp), intent(inout) :: xr(NP)
+    logical, intent(in) :: act(NP)
+    real(dp), intent(in) :: clp
+    real(dp), intent(out) :: score
+    integer, intent(out) :: nused
+    real(dp), allocatable :: v(:), pr(:), ar(:)
+    logical, allocatable :: u(:)
+    real(dp) :: cv(NP,NP), rr
+    integer :: j
+    allocate(v(nobs), pr(nobs), u(nobs), ar(nobs))
+    v = obs(1:nobs)%value
+    call fit_lm(xr, v, act, clp, cv, u, rr, .false.)
+    call predict_all(xr, pr)
+    do j = 1, nobs
+      ar(j) = abs(dresid(obs(j), v(j), pr(j)))
+    end do
+    score = median(ar)
+    nused = count(u)
+  end subroutine
+
+  subroutine med_resid_year(v, pr, r86, r95)
+    real(dp), intent(in) :: v(nobs), pr(nobs)
+    real(dp), intent(out) :: r86, r95
+    real(dp) :: a(nobs), b(nobs)
+    integer :: j, na, nb
+    na = 0; nb = 0
+    do j = 1, nobs
+      if (obs(j)%year == 1586) then
+        na = na + 1; a(na) = abs(dresid(obs(j), v(j), pr(j)))
+      else
+        nb = nb + 1; b(nb) = abs(dresid(obs(j), v(j), pr(j)))
+      end if
+    end do
+    r86 = median(a(1:na)); r95 = median(b(1:nb))
+  end subroutine
+
+  subroutine sort_vals(a)
+    real(dp), intent(inout) :: a(:)
+    real(dp) :: t
+    integer :: i2, j2
+    do i2 = 2, size(a)
+      t = a(i2); j2 = i2 - 1
+      do while (j2 >= 1)
+        if (a(j2) <= t) exit
+        a(j2+1) = a(j2); j2 = j2 - 1
+      end do
+      a(j2+1) = t
+    end do
+  end subroutine
+
+  subroutine write_blind_residuals(xf, u, v)
+    real(dp), intent(in) :: xf(NP), v(nobs)
+    logical, intent(in) :: u(nobs)
+    real(dp) :: pr(nobs)
+    integer :: un, j
+    call predict_all(xf, pr)
+    open(newunit=un, file='tycho_blind_residuals.dat', status='replace')
+    write(un, '(A)') '# id year body qty tkind jd_tt used value_deg fit_deg jpl_deg resid_fit_arcmin resid_jpl_arcmin'
+    do j = 1, nobs
+      write(un, '(A12,I5,1X,A1,1X,A6,1X,A1,F18.8,L3,3F14.7,2F10.3)') obs(j)%id, obs(j)%year, &
+          merge('S', 'M', obs(j)%body == 1), obs(j)%qty, obs(j)%tkind, obs(j)%jd, u(j), v(j), pr(j), obs(j)%jpl, &
+          dresid(obs(j), v(j), pr(j)), dresid(obs(j), v(j), obs(j)%jpl)
+    end do
+    close(un)
+    print '(A)', '   residuals written to tycho_blind_residuals.dat'
+  end subroutine
 
   function group_name(g) result(s)
     integer, intent(in) :: g
@@ -1017,7 +1679,7 @@ contains
     real(dp) :: rr(nobs)
     logical :: u(nobs)
     do i = 1, nobs
-      rr(i) = resid_arcmin(obs(i), obs(i)%value, obs(i)%jpl)
+      rr(i) = dresid(obs(i), obs(i)%value, obs(i)%jpl)
     end do
     u = .true.
     sigma_g = 1.0_dp
@@ -1104,7 +1766,7 @@ contains
     do i = 1, nobs
       write(un, '(A12,I5,1X,A1,1X,A6,F18.8,L3,3F14.7,2F10.3)') obs(i)%id, obs(i)%year, &
           merge('S', 'M', obs(i)%body == 1), obs(i)%qty, obs(i)%jd, u(i), obs(i)%value, pred(i), obs(i)%jpl, &
-          resid_arcmin(obs(i), obs(i)%value, pred(i)), resid_arcmin(obs(i), obs(i)%value, obs(i)%jpl)
+          dresid(obs(i), obs(i)%value, pred(i)), dresid(obs(i), obs(i)%value, obs(i)%jpl)
     end do
     close(un)
     print '(A)', '   residuals written to tycho_fit_residuals.dat'
