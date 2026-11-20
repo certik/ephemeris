@@ -253,6 +253,37 @@ Moon xyz km, Earth dist km, Moon dist km, velocity km/s, range rate km/s)
 
 ---
 
+### `tycho_fit.f90`
+
+Fits the Sun's (Earth's heliocentric) and the Moon's geocentric orbits,
+including the Earth–Sun and Earth–Moon distances, to Tycho Brahe's raw
+Sun and Moon readings of 1586 and 1595 (exported by the `tycho`
+repository's `export_fit_data.py`). 14 osculating elements at 1590-07-01
+plus 3 instrument zero points; N-body propagation (Sun, Earth, Moon,
+Mercury–Saturn as fixed perturbers, Earth J2 on the Moon, Yoshida 4th
+order, 1 h steps); topocentric prediction of each reading from Uraniborg
+(aberration, parallax, limbs, refraction). Batch least squares
+(Levenberg–Marquardt with parameter scaling, robust weights, clipping) and
+an iterated EKF on the same model.
+
+**Build and run** (from `build/tycho`, with the `.dat` files copied there):
+```bash
+mkdir -p build/tycho
+gfortran -O3 -march=native -ffree-line-length-none -J build/tycho -o build/tycho/tycho_fit src/constants_mod.f90 app/tycho_fit.f90
+./tycho_fit tycho_obs_10arcmin.dat jpl_state.dat fit 4
+```
+Arguments: `<obs> <state> <mode> [clip_sigma] [n_mc] [seed] [noplanets] [noj2]`.
+Modes: `check` (model vs JPL's predictions), `fit` (batch LS + IEKF from a
+perturbed start), `mc` (Monte Carlo on synthetic data), `profile` (χ² against
+a fixed Earth–Sun distance), `kepler` (Moon on a fixed Kepler ellipse),
+`jplfit`/`jplfit0` (fit JPL's own predictions, model bias).
+
+**Inputs:** `tycho_obs_*arcmin.dat`, `jpl_state.dat`  
+**Output:** log on stdout, `tycho_fit_residuals.dat`. Results and discussion:
+`data/fit/README.md` in the `tycho` repository.
+
+---
+
 ## Data Flow
 
 ```
