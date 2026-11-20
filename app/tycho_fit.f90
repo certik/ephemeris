@@ -2483,32 +2483,7 @@ contains
       use_dfar = .true.; param_on(90) = .true.
     end if
     if (index(arg, 'rstar') > 0) then
-      ! only stars read against the Moon on at least star_min_nights
-      ! different nights (seen from many directions) get an offset
-      reff(5) = .true.; use_rstar = .true.
-      block
-        integer :: st2, kk2, nn, ns_on
-        real(dp) :: nights(MAXOBS)
-        character(len=32) :: sv
-        integer :: star_min_nights
-        star_min_nights = 10
-        call get_environment_variable('TYCHO_STAR_NIGHTS', sv, status=st2)
-        if (st2 == 0 .and. len_trim(sv) > 0) read(sv, *) star_min_nights
-        ns_on = 0
-        do kk2 = 1, NSTAR
-          nn = 0
-          do k1 = 1, nobs
-            if (obs(k1)%star /= kk2 .or. obs(k1)%body /= 2) cycle
-            if (nn > 0) then
-              if (any(abs(nights(1:nn) - anint(obs(k1)%jd)) < 0.5_dp)) cycle
-            end if
-            nn = nn + 1; nights(nn) = anint(obs(k1)%jd)
-          end do
-          param_on(IST0 + 2*kk2 - 1:IST0 + 2*kk2) = nn >= star_min_nights
-          if (nn >= star_min_nights) ns_on = ns_on + 1
-        end do
-        print '(A,I3,A,I3,A)', '   star offsets for ', ns_on, ' stars read on at least ', star_min_nights, ' nights'
-      end block
+      reff(5) = .true.; use_rstar = .true.   ! which stars: after the subset (select_stars)
     end if
     if (index(arg, 'mdec') > 0) then
       use_mdec = .true.; param_on(96:95 + NMON) = .true.
@@ -2571,6 +2546,43 @@ contains
     call get_arg(12, arg)
     call quarter_table(xb)
     if (len_trim(arg) > 0 .and. trim(arg) /= 'all') call apply_subset(trim(arg))
+    if (use_rstar) then
+      ! only stars read against the Moon on at least star_min_nights
+      ! different nights with the Moon waxing AND as many with it waning
+      ! (seen from both sides of the Sun-Moon line, so that an offset of
+      ! the star cannot stand in for the parallactic inequality) get an
+      ! offset; the phase from the model's own orbits
+      block
+        integer :: st2, kk2, nn(2), ns_on, ph
+        real(dp) :: nights(MAXOBS, 2)
+        real(dp), allocatable :: ptmp(:)
+        character(len=32) :: sv
+        integer :: star_min_nights
+        star_min_nights = 5
+        call get_environment_variable('TYCHO_STAR_NIGHTS', sv, status=st2)
+        if (st2 == 0 .and. len_trim(sv) > 0) read(sv, *) star_min_nights
+        allocate(ptmp(nobs)); call predict_all(xb, ptmp)
+        ns_on = 0
+        do kk2 = 1, NSTAR
+          nn = 0
+          do k1 = 1, nobs
+            if (obs(k1)%star /= kk2 .or. obs(k1)%body /= 2) cycle
+            ph = merge(1, 2, elong(k1) < 180.0_dp)
+            if (nn(ph) > 0) then
+              if (any(abs(nights(1:nn(ph), ph) - anint(obs(k1)%jd)) < 0.5_dp)) cycle
+            end if
+            nn(ph) = nn(ph) + 1; nights(nn(ph), ph) = anint(obs(k1)%jd)
+          end do
+          param_on(IST0 + 2*kk2 - 1:IST0 + 2*kk2) = minval(nn) >= star_min_nights
+          if (minval(nn) >= star_min_nights) then
+            ns_on = ns_on + 1
+            print '(A,I3,A,I4,A,I4,A)', '      star', kk2, ':', nn(1), ' nights waxing,', nn(2), ' waning'
+          end if
+        end do
+        print '(A,I3,A,I3,A)', '   star offsets for ', ns_on, ' stars read on at least ', star_min_nights, &
+            ' nights both waxing and waning'
+      end block
+    end if
     print '(/A,I6,A)', '   5. All readings (', nobs, '), all years together'
     block
       real(dp), allocatable :: v(:), pr(:)
