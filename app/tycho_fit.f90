@@ -90,6 +90,10 @@ module tycho_fit_mod
   ! reading on the armillae (declinations, hour angles, RA differences and
   ! the clock stars)
   logical :: use_armil = .false.
+  ! "phase": a limb reading of the Moon is the extreme point of its LIT part
+  ! in the direction read (a horn of the crescent, the edge of the
+  ! terminator of a gibbous Moon), from the model's own Sun
+  logical :: use_phase = .false.
   ! "nosunpar": the Sun seen from the Earth's centre (its 9" diurnal
   ! parallax, which also carries the Earth-Sun distance, left out), so
   ! that only the Moon's motion measures the distance
@@ -316,6 +320,55 @@ contains
     H2 = atan2(u(2), u(1))*RAD2DEG
     d2 = asin(max(-1.0_dp, min(1.0_dp, u(3))))*RAD2DEG
   end subroutine
+
+  ! Unit direction (east, north) on the sky from (H1, d1) toward (H2, d2)
+  subroutine sky_dir(H1, d1, H2, d2, ue, un)
+    real(dp), intent(in) :: H1, d1, H2, d2
+    real(dp), intent(out) :: ue, un
+    real(dp) :: da, n
+    da = -(H2 - H1)*DEG2RAD                ! right ascension grows eastward, hour angle westward
+    ue = sin(da)*cos(d2*DEG2RAD)
+    un = cos(d1*DEG2RAD)*sin(d2*DEG2RAD) - sin(d1*DEG2RAD)*cos(d2*DEG2RAD)*cos(da)
+    n = max(sqrt(ue*ue + un*un), 1.0d-12); ue = ue/n; un = un/n
+  end subroutine
+
+  ! Apparent semidiameter of the lit Moon in the direction of limb point pt
+  ! (U, L in altitude; E, W; N toward, F away from (Hx, dx)); sd for the full
+  ! disk.  Sun at (Hs, ds).  On the dark side the lit figure reaches
+  ! sd*sqrt(cos^2 phi + max(cos i, 0)^2 sin^2 phi), phi from the line of the
+  ! horns, i the phase angle (about 180 deg - elongation).
+  function lit_sd(pt, H, d, sd, Hs, ds, Hx, dx) result(sdl)
+    character(len=1), intent(in) :: pt
+    real(dp), intent(in) :: H, d, sd, Hs, ds, Hx, dx
+    real(dp) :: sdl, se, sn, ue, un, a, A_az, H2, d2, ct, cp, ci, n
+    sdl = sd
+    if (.not. use_phase) return
+    select case (pt)
+    case ('U', 'L')
+      call eq_to_hor(H, d, a, A_az)
+      call hor_to_eq(a + 0.05_dp, A_az, H2, d2)
+      ue = -wrap180(H2 - H)*cos(d*DEG2RAD); un = d2 - d
+      n = max(sqrt(ue*ue + un*un), 1.0d-12); ue = ue/n; un = un/n
+      if (pt == 'L') then
+        ue = -ue; un = -un
+      end if
+    case ('E'); ue = 1.0_dp; un = 0.0_dp
+    case ('W'); ue = -1.0_dp; un = 0.0_dp
+    case ('N', 'F')
+      call sky_dir(H, d, Hx, dx, ue, un)
+      if (pt == 'F') then
+        ue = -ue; un = -un
+      end if
+    case default
+      return
+    end select
+    call sky_dir(H, d, Hs, ds, se, sn)
+    ct = ue*se + un*sn
+    if (ct >= 0.0_dp) return                 ! the lit side: the limb itself
+    cp = abs(-ue*sn + un*se)                 ! cos of the angle to the line of the horns
+    ci = max(-cos(sep(H, d, Hs, ds)*DEG2RAD), 0.0_dp)   ! cos(phase angle) on a gibbous Moon
+    sdl = sd*sqrt(cp*cp + ci*ci*ct*ct)
+  end function
 
   function sep(H1, d1, H2, d2) result(s)
     real(dp), intent(in) :: H1, d1, H2, d2
@@ -564,7 +617,7 @@ contains
   function predict_pt(o, x, rsun, rmoon, vearth) result(p)
     type(reading), intent(in) :: o
     real(dp), intent(in) :: x(NP), rsun(3), rmoon(3), vearth(3)
-    real(dp) :: p, H, d, sd, Hl, dl, Hr, dr, a, A_az, Hs, ds, sds, Hc, dc, Ho, dov
+    real(dp) :: p, H, d, sd, Hl, dl, Hr, dr, a, A_az, Hs, ds, sds, Hc, dc, Ho, dov, Hsun, dsun, sdx, h1, h2
     if (o%body == 3) then
       ! a clock star's hour angle on the armillae
       call refract(wrap180(o%last - o%sra), o%sdec, Hr, dr)
@@ -576,11 +629,13 @@ contains
     else
       call topo(rmoon, vearth, o, H, d, sd, MOON_RADIUS*x(iy(18, o%year)))
     end if
+    Hsun = 0.0_dp; dsun = 0.0_dp
+    if (use_phase .and. o%body == 2) call topo(rsun, vearth, o, Hsun, dsun, sdx, SUN_RADIUS, no_sun_par)
     p = 0.0_dp
     select case (trim(o%qty))
     case ('ALT', 'ALTM')
       if (o%point == 'U' .or. o%point == 'L') then
-        call limb_point(H, d, sd, o%point, Hl, dl)
+        call limb_point(H, d, msd(o%point), o%point, Hl, dl)
       else
         Hl = H; dl = d
       end if
@@ -588,22 +643,22 @@ contains
       p = a + refraction_deg(a) + x(iy(15, o%year))/60.0_dp
       if (use_ew) p = p + x(36 + yidx(o%year))/60.0_dp*sin(A_az*DEG2RAD)
     case ('DEC')
-      call limb_point(H, d, sd, o%point, Hl, dl)
+      call limb_point(H, d, msd(o%point), o%point, Hl, dl)
       call refract(Hl, dl, Hr, dr)
       call armil(Hr, dr, x, o%year, Hc, dr)
       p = dr + x(merge(16, merge(30, 17, o%year == 1594), o%year == 1586))/60.0_dp
     case ('HA')
-      call limb_point(H, d, sd, o%point, Hl, dl)
+      call limb_point(H, d, msd(o%point), o%point, Hl, dl)
       call refract(Hl, dl, Hr, dr)
       call armil(Hr, dr, x, o%year, p, dc)
     case ('AZ')
-      call limb_point(H, d, sd, o%point, Hl, dl)
+      call limb_point(H, d, msd(o%point), o%point, Hl, dl)
       call refract(Hl, dl, Hr, dr)
       call eq_to_hor(Hr, dr, a, A_az)
       p = wrap180(A_az - 180.0_dp)
       if (use_ew) p = p + x(39 + yidx(o%year))/60.0_dp
     case ('DIAM')
-      p = 2.0_dp*sd
+      p = msd('U') + msd('L')
     case ('DIST', 'RADIFF')
       if (trim(o%refkind) == 'STAR') then
         Hs = wrap180(o%last - o%sra); ds = o%sdec; sds = 0.0_dp
@@ -611,7 +666,7 @@ contains
         call topo(rsun, vearth, o, Hs, ds, sds, SUN_RADIUS, no_sun_par)
       end if
       if (trim(o%qty) == 'RADIFF') then
-        call limb_point(H, d, sd, o%point, Hl, dl)
+        call limb_point(H, d, msd(o%point), o%point, Hl, dl)
         call refract(Hl, dl, Hc, dc)
         call armil(Hc, dc, x, o%year, Hr, dr)
         call limb_point(Hs, ds, sds, o%refpoint, Hl, dl)
@@ -623,13 +678,13 @@ contains
         call refract(Hs, ds, Ho, dov)
         p = sep(Hc, dc, Ho, dov)
         select case (o%point)
-        case ('N'); p = p - sd
-        case ('F'); p = p + sd
+        case ('N'); p = p - lit_sd('N', H, d, sd, Hsun, dsun, Hs, ds)
+        case ('F'); p = p + lit_sd('F', H, d, sd, Hsun, dsun, Hs, ds)
         case ('U', 'L', 'E', 'W')
           if (side(Hc, dc, Ho, dov, o%point) > 0.0_dp) then
-            p = p - sd
+            p = p - msd(o%point)
           else
-            p = p + sd
+            p = p + msd(o%point)
           end if
         end select
         if (o%refpoint /= 'C' .and. sds > 0.0_dp) then
@@ -641,6 +696,14 @@ contains
         end if
       end if
     end select
+  contains
+    ! the Moon's (lit) semidiameter toward limb point pt; the full sd for the Sun
+    function msd(pt) result(sdl)
+      character(len=1), intent(in) :: pt
+      real(dp) :: sdl
+      sdl = sd
+      if (o%body == 2) sdl = lit_sd(pt, H, d, sd, Hsun, dsun, 0.0_dp, 0.0_dp)
+    end function
   end function
 
   ! ── Predictions for all readings for a parameter vector ─────────────
@@ -1773,6 +1836,7 @@ contains
     if (index(arg, 'ewinst') > 0) then
       use_ew = .true.; param_on(37:42) = .true.
     end if
+    if (index(arg, 'phase') > 0) use_phase = .true.
     if (index(arg, 'armil') > 0) then
       use_armil = .true.; param_on(31:36) = .true.
     end if
