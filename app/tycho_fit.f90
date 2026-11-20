@@ -273,6 +273,10 @@ module tycho_fit_mod
   logical :: kepler_moon = .false.    ! Moon on an unperturbed Kepler ellipse about the Earth
   real(dp) :: last_chi2 = 0.0_dp
 
+  ! OpenMP: what a prediction writes as scratch is private to each thread
+  !$omp threadprivate(lat_deg, ref_scale, h_scale, coslat_rho, sinlat_rho, cur_i, alt_read, ha_read, &
+  !$omp&   star_dp, farlimb, elong, t_used, c_pos, c_vel, c_key)
+
 contains
 
   ! ── small helpers ─────────────────────────────────────────────────
@@ -1520,7 +1524,9 @@ contains
     end do
     J = 0.0_dp
     fix_choice = .true.          ! the same limbs for the perturbed orbits
-    do k = 1, NP
+    ! the analytic columns (window zeros, star offsets), from the prediction
+    ! just made
+    do k = 96, NP
       if (.not. active(k) .or. .not. param_on(k)) cycle
       if (k > IST0) then
         ! a reference star's offset
@@ -1547,6 +1553,12 @@ contains
         end do
         cycle
       end if
+    end do
+    ! the numerical columns, in parallel (each column on its own)
+    !$omp parallel do schedule(dynamic) default(shared) private(k, i, h, xp, xm, pp, pm) &
+    !$omp& copyin(lat_deg, ref_scale, h_scale, coslat_rho, sinlat_rho)
+    do k = 1, 95
+      if (.not. active(k) .or. .not. param_on(k)) cycle
       h = fd_step(x, k)
       xp = x; xp(k) = x(k) + h
       xm = x; xm(k) = x(k) - h
@@ -1557,7 +1569,43 @@ contains
         J(i, k) = resid_arcmin(obs(i), pp(i), pm(i))/(2.0_dp*h)*pscale(x, k)   ! d(prediction)/d(scaled param), arcmin
       end do
     end do
+    !$omp end parallel do
     fix_choice = .false.
+  end subroutine
+
+  ! Cholesky factor A = L L^T (as in chol_solve)
+  subroutine chol_factor(A, L, ok)
+    real(dp), intent(in) :: A(:,:)
+    real(dp), intent(out) :: L(size(A,1), size(A,1))
+    logical, intent(out) :: ok
+    real(dp) :: s
+    integer :: n, i, j
+    n = size(A,1); L = 0.0_dp; ok = .true.
+    do j = 1, n
+      s = A(j,j) - sum(L(j,1:j-1)**2)
+      if (s <= 0.0_dp) then
+        ok = .false.; return
+      end if
+      L(j,j) = sqrt(s)
+      do i = j+1, n
+        L(i,j) = (A(i,j) - sum(L(i,1:j-1)*L(j,1:j-1)))/L(j,j)
+      end do
+    end do
+  end subroutine
+
+  ! solve L L^T x = b with the factor of chol_factor (as in chol_solve)
+  subroutine chol_subst(L, b, x)
+    real(dp), intent(in) :: L(:,:), b(:)
+    real(dp), intent(out) :: x(size(b))
+    real(dp) :: y(size(b))
+    integer :: n, i
+    n = size(b)
+    do i = 1, n
+      y(i) = (b(i) - sum(L(i,1:i-1)*y(1:i-1)))/L(i,i)
+    end do
+    do i = n, 1, -1
+      x(i) = (y(i) - sum(L(i+1:n,i)*x(i+1:n)))/L(i,i)
+    end do
   end subroutine
 
   ! ── Symmetric positive-definite solve (Cholesky) ────────────────────
@@ -1636,14 +1684,21 @@ contains
       chi2 = 0.0_dp; N = 0.0_dp; g = 0.0_dp
       do i = 1, nobs
         if (.not. use(i)) cycle
-        w = wr(i)/sigma_g(obs(i)%group)**2
-        chi2 = chi2 + w*r(i)**2
-        do k = 1, na
+        chi2 = chi2 + wr(i)/sigma_g(obs(i)%group)**2*r(i)**2
+      end do
+      ! the normal equations, a row per thread (each element summed over the
+      ! readings in the same order as serially: identical results)
+      !$omp parallel do schedule(dynamic) default(shared) private(k, i, w)
+      do k = 1, na
+        do i = 1, nobs
+          if (.not. use(i)) cycle
           if (J(i, idx(k)) == 0.0_dp) cycle
+          w = wr(i)/sigma_g(obs(i)%group)**2
           g(idx(k)) = g(idx(k)) + w*J(i, idx(k))*r(i)
           N(idx(k), idx(1:na)) = N(idx(k), idx(1:na)) + w*J(i, idx(k))*J(i, idx(1:na))
         end do
       end do
+      !$omp end parallel do
       ! random effects: a campaign's value is drawn about zero with spread tau
       do k = 1, na
         uu = prior_tau(idx(k))
@@ -1706,17 +1761,22 @@ contains
       if (abs(chi2 - chi2n) < 1.0d-7*chi2) nstall = nstall + 1
       if (nstall >= 3 .and. it > 5) exit
     end do
-    ! covariance of the active parameters
+    ! covariance of the active parameters: one factorization, a solve per
+    ! column (the same arithmetic as factoring for every column)
     cov = 0.0_dp
-    do k = 1, na
-      e = 0.0_dp; e(k) = 1.0_dp
-      block
-        real(dp) :: A(na,na), s(na)
-        A = N(idx(1:na), idx(1:na))
-        call chol_solve(A, e(1:na), s, ok)
-        if (ok) cov(idx(1:na), idx(k)) = s
-      end block
-    end do
+    block
+      real(dp), allocatable :: A(:,:), L(:,:), s(:)
+      allocate(A(na,na), L(na,na), s(na))
+      A = N(idx(1:na), idx(1:na))
+      call chol_factor(A, L, ok)
+      if (ok) then
+        do k = 1, na
+          e = 0.0_dp; e(k) = 1.0_dp
+          call chol_subst(L, e(1:na), s)
+          cov(idx(1:na), idx(k)) = s
+        end do
+      end if
+    end block
     do k = 1, NP
       do i = 1, NP
         cov(i, k) = cov(i, k)*pscale(x, i)*pscale(x, k)
@@ -2423,7 +2483,32 @@ contains
       use_dfar = .true.; param_on(90) = .true.
     end if
     if (index(arg, 'rstar') > 0) then
-      reff(5) = .true.; use_rstar = .true.; param_on(IST0 + 1:NP) = .true.
+      ! only stars read against the Moon on at least star_min_nights
+      ! different nights (seen from many directions) get an offset
+      reff(5) = .true.; use_rstar = .true.
+      block
+        integer :: st2, kk2, nn, ns_on
+        real(dp) :: nights(MAXOBS)
+        character(len=32) :: sv
+        integer :: star_min_nights
+        star_min_nights = 10
+        call get_environment_variable('TYCHO_STAR_NIGHTS', sv, status=st2)
+        if (st2 == 0 .and. len_trim(sv) > 0) read(sv, *) star_min_nights
+        ns_on = 0
+        do kk2 = 1, NSTAR
+          nn = 0
+          do k1 = 1, nobs
+            if (obs(k1)%star /= kk2 .or. obs(k1)%body /= 2) cycle
+            if (nn > 0) then
+              if (any(abs(nights(1:nn) - anint(obs(k1)%jd)) < 0.5_dp)) cycle
+            end if
+            nn = nn + 1; nights(nn) = anint(obs(k1)%jd)
+          end do
+          param_on(IST0 + 2*kk2 - 1:IST0 + 2*kk2) = nn >= star_min_nights
+          if (nn >= star_min_nights) ns_on = ns_on + 1
+        end do
+        print '(A,I3,A,I3,A)', '   star offsets for ', ns_on, ' stars read on at least ', star_min_nights, ' nights'
+      end block
     end if
     if (index(arg, 'mdec') > 0) then
       use_mdec = .true.; param_on(96:95 + NMON) = .true.
