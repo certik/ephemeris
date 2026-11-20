@@ -69,7 +69,10 @@ module tycho_fit_mod
   ! distances (x(346:470)) and an excess of the distances read to the far
   ! limb (x(471:595)) of each window
   integer, parameter :: NMON = 125
-  integer, parameter :: NP_ORB = 14, NP_NUIS = 81 + 4*NMON, NP = NP_ORB + NP_NUIS
+  ! reference stars of the distances: an offset (east, north; arcmin) of
+  ! each from the catalogue, x(596:...), "rstar" (random effects)
+  integer, parameter :: NSTAR = 80, IST0 = 95 + 4*NMON
+  integer, parameter :: NP_ORB = 14, NP_NUIS = 81 + 4*NMON + 2*NSTAR, NP = NP_ORB + NP_NUIS
   integer, parameter :: MAXOBS = 20000
   real(dp), parameter :: LAT0_DEG = 55.0_dp + 54.0_dp/60 + 27.0_dp/3600
   ! latitude used by the predictions: LAT0_DEG + x(20) (arcmin); refraction
@@ -131,8 +134,12 @@ module tycho_fit_mod
   ! of a correction scatter about its mean (the year's offset; for the far
   ! limb one excess, x(90)) with a spread tau (arcmin) found from the data;
   ! kinds 1 declination, 2 altitude, 3 distance, 4 far limb
-  logical :: reff(4) = .false.
-  real(dp) :: tau_re(4) = 1.0_dp
+  logical :: reff(5) = .false.
+  real(dp) :: tau_re(5) = 1.0_dp
+  ! derivatives of a reading with respect to its reference star's east and
+  ! north offsets (arcmin per arcmin), set in predict_pt
+  real(dp) :: star_dp(2, MAXOBS) = 0.0_dp
+  logical :: use_rstar = .false.
   ! reading being predicted, and whether a distance was read to the Moon's
   ! far limb (set in predict_pt)
   integer :: cur_i = 0
@@ -224,6 +231,8 @@ module tycho_fit_mod
     real(dp) :: dclock = 0.0_dp
     ! window (observing campaign) of the reading, for the window zeros
     integer :: win = 1
+    ! reference star (1..nstar_used), 0 if none
+    integer :: star = 0
   end type
 
   type(reading) :: obs(MAXOBS), obs_all(MAXOBS)
@@ -292,6 +301,31 @@ contains
     ip_year = 0
     if (yidx(year) >= 4) ip_year = 43 + 9*(yidx(year) - 4) + j
   end function
+
+  ! the reference stars: the same star has the same place in the frame of
+  ! the readings file (the date's place rotated back with the reading's
+  ! matrix M)
+  subroutine set_stars()
+    real(dp) :: v(3), u(3), list(3, NSTAR)
+    integer :: i, k, ns
+    ns = 0
+    do i = 1, nobs
+      obs(i)%star = 0
+      if (trim(obs(i)%refkind) /= 'STAR') cycle
+      u = [cos(obs(i)%sdec*DEG2RAD)*cos(obs(i)%sra*DEG2RAD), cos(obs(i)%sdec*DEG2RAD)*sin(obs(i)%sra*DEG2RAD), &
+           sin(obs(i)%sdec*DEG2RAD)]
+      v = matmul(transpose(obs(i)%M), u)
+      do k = 1, ns
+        if (dot_product(v, list(:, k)) > cos(5.0_dp/60.0_dp*DEG2RAD)) exit
+      end do
+      if (k > ns) then
+        if (ns == NSTAR) stop 'set_stars: more than NSTAR reference stars'
+        ns = ns + 1; list(:, ns) = v; k = ns
+      end if
+      obs(i)%star = k
+    end do
+    print '(A,I4,A)', '   reference stars of the distances:', ns, ' (an offset each with rstar)'
+  end subroutine
 
   ! window of every reading: fixed win_days windows, or campaigns of Moon
   ! readings separated by pauses longer than camp_gap days (the Sun's
@@ -434,7 +468,8 @@ contains
     prior_tau = 0.0_dp
     if (k <= 95) return
     kind = (k - 96)/NMON + 1
-    if (kind >= 1 .and. kind <= 4) then
+    if (k > IST0) kind = 5
+    if (kind >= 1 .and. kind <= 5) then
       if (reff(kind)) prior_tau = tau_re(kind)
     end if
   end function
@@ -446,11 +481,12 @@ contains
     real(dp), intent(in) :: x(NP), cv(NP,NP)
     integer :: kind, w, k, n
     real(dp) :: s
-    do kind = 1, 4
+    do kind = 1, 5
       if (.not. reff(kind)) cycle
       s = 0.0_dp; n = 0
-      do w = 1, NMON
+      do w = 1, merge(2*NSTAR, NMON, kind == 5)
         k = 95 + (kind - 1)*NMON + w
+        if (kind == 5) k = IST0 + w
         if (cv(k, k) <= 0.0_dp) cycle
         s = s + x(k)**2 + cv(k, k); n = n + 1
       end do
@@ -480,7 +516,7 @@ contains
     case ('mdist')
       use_mdist = on; param_on(96 + 2*NMON:95 + 3*NMON) = on
     case ('mfar')
-      use_mfar = on; param_on(96 + 3*NMON:NP) = on
+      use_mfar = on; param_on(96 + 3*NMON:IST0) = on
     end select
   end subroutine
 
@@ -515,6 +551,10 @@ contains
       write(PNAME(95 + NMON + k), '(A,I3.3)') 'da', k
       write(PNAME(95 + 2*NMON + k), '(A,I3.3)') 'di', k
       write(PNAME(95 + 3*NMON + k), '(A,I3.3)') 'df', k
+    end do
+    do k = 1, NSTAR
+      write(PNAME(IST0 + 2*k - 1), '(A,I2.2)') 'stE', k
+      write(PNAME(IST0 + 2*k), '(A,I2.2)') 'stN', k
     end do
   end subroutine
 
@@ -1004,6 +1044,10 @@ contains
     case ('DIST', 'RADIFF')
       if (trim(o%refkind) == 'STAR') then
         Hs = wrap180(o%last - o%sra); ds = o%sdec; sds = 0.0_dp
+        if (use_rstar .and. o%star > 0) then
+          Hs = Hs - x(IST0 + 2*o%star - 1)/60.0_dp/max(cos(ds*DEG2RAD), 1.0d-6)
+          ds = ds + x(IST0 + 2*o%star)/60.0_dp
+        end if
       else
         call topo(rsun, vearth, o, Hs, ds, sds, SUN_RADIUS, no_sun_par)
       end if
@@ -1015,10 +1059,16 @@ contains
         call refract(Hl, dl, Hc, dc)
         call armil(Hc, dc, x, o%year, Ho, dov)
         p = wrap180(Ho - Hr)
+        if (cur_i > 0 .and. o%star > 0) star_dp(:, cur_i) = [-1.0_dp/max(cos(ds*DEG2RAD), 1.0d-6), 0.0_dp]
       else
         call refract(H, d, Hc, dc)
         call refract(Hs, ds, Ho, dov)
         p = sep(Hc, dc, Ho, dov)
+        if (cur_i > 0 .and. o%star > 0) then
+          ! the separation's change for a star moved 1' east / north
+          star_dp(1, cur_i) = (sep(Hc, dc, Ho - 1.0_dp/60.0_dp/max(cos(dov*DEG2RAD), 1.0d-6), dov) - p)*60.0_dp
+          star_dp(2, cur_i) = (sep(Hc, dc, Ho, dov + 1.0_dp/60.0_dp) - p)*60.0_dp
+        end if
         if (use_mdist .and. o%body == 2) p = p + x(95 + 2*NMON + o%win)/60.0_dp
         select case (o%point)
         case ('N'); p = p - lit_sd('N', H, d, sd, Hsun, dsun, Hs, ds)
@@ -1265,6 +1315,7 @@ contains
     close(u)
     nall = nobs
     call set_windows()
+    call set_stars()
     obs_all(1:nall) = obs(1:nobs)
     call sort_order()
     k = 0
@@ -1471,6 +1522,13 @@ contains
     fix_choice = .true.          ! the same limbs for the perturbed orbits
     do k = 1, NP
       if (.not. active(k) .or. .not. param_on(k)) cycle
+      if (k > IST0) then
+        ! a reference star's offset
+        do i = 1, nobs
+          if (obs(i)%star == (k - IST0 + 1)/2) J(i, k) = star_dp(2 - mod(k - IST0, 2), i)
+        end do
+        cycle
+      end if
       if (k > 95) then
         ! a window's zero: the prediction moves one-for-one (arcmin)
         do i = 1, nobs
@@ -1887,7 +1945,26 @@ program tycho_fit
   end block
   call setup_observer()
   call read_obs(trim(obs_file))
-  call read_state(trim(state_file), x_true)
+  if (alien) then
+    ! the procedure reads nothing from the state file but the epoch (a
+    ! date chosen in the middle of the readings); JPL's orbits are not
+    ! loaded at all (compare_orbits.py compares afterwards)
+    block
+      integer :: un, ios
+      character(len=512) :: ln
+      open(newunit=un, file=trim(state_file), status='old', action='read')
+      do
+        read(un, '(A)', iostat=ios) ln
+        if (ios /= 0) stop 'no epoch in the state file'
+        if (ln(1:1) == '#' .or. len_trim(ln) == 0) cycle
+        read(ln, *) epoch_jd; exit
+      end do
+      close(un)
+    end block
+    x_true = 0.0_dp; sun_state = 0.0_dp; planet_state = 0.0_dp
+  else
+    call read_state(trim(state_file), x_true)
+  end if
   ! Earth's pole (ICRS) at the epoch: third row of the rotation to the
   ! equator of date of the reading nearest to the epoch
   k = minloc([(abs(obs(i)%jd - epoch_jd), i = 1, nobs)], 1)
@@ -1901,7 +1978,7 @@ program tycho_fit
     ! DIAGNOSTIC (argument 11 contains 'planets'): the planets as perturbers,
     ! started from DE441
     call get_arg(11, arg)
-    if (index(arg, 'planets') > 0) then
+    if (index(arg, 'planets') > 0 .and. .not. alien) then
       nb_used = 8; use_planets = .true.
       call read_state(trim(state_file), x_true)
       print '(A)', '   DIAGNOSTIC: planets from DE441 as perturbers'
@@ -1927,7 +2004,7 @@ program tycho_fit
       '   planets:', use_planets
   values = [(obs(i)%value, i = 1, nobs)]
   active = .true.
-  call predict_all(x_true, pred)
+  if (.not. alien) call predict_all(x_true, pred)
 
   select case (trim(mode))
 
@@ -1986,8 +2063,8 @@ program tycho_fit
     call report(" Fitted orbits from Tycho's readings (formal 1-sigma)", x, sig, x_true)
     call print_sigmas()
     call write_residuals(x, use)
-    write(*, '(A,595ES20.11)') ' FIT ', x
-    write(*, '(A,595ES20.11)') ' SIG ', sig
+    write(*, '(A,755ES20.11)') ' FIT ', x
+    write(*, '(A,755ES20.11)') ' SIG ', sig
     print '(/A)', ' Iterated extended Kalman filter (sequential updates, F = I, Q = 0), same readings and weights'
     sigma_prior = [0.05_dp, 0.05_dp, 0.05_dp, 0.5_dp, 0.5_dp, 1.0d-4, 1.0d7, &
                    0.05_dp, 0.05_dp, 0.05_dp, 0.5_dp, 0.5_dp, 1.0d-2, 4.0d4, 5.0_dp, 5.0_dp, 5.0_dp, &
@@ -1996,7 +2073,7 @@ program tycho_fit
                    5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, &
                    (5.0_dp, 5.0_dp, 0.1_dp, 0.3_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, ii_ = 1, 5), &
                    1.0_dp, 0.1_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, &
-                   (5.0_dp, ii_ = 1, 4*NMON)]
+                   (5.0_dp, ii_ = 1, 4*NMON), (1.0_dp, ii_ = 1, 2*NSTAR)]
     x = x0
     call fit_iekf(x, values, active, use, sigma_prior, 30, P)
     do k = 1, NP
@@ -2011,7 +2088,7 @@ program tycho_fit
     end do
     print '(A,F8.3,A,F12.2)', '   rms residual ', sqrt(rms/n), "'   chi2 ", r
     call report(' Iterated EKF result (1-sigma from the filter covariance)', x, sig, x_true)
-    write(*, '(A,595ES20.11)') ' EKF ', x
+    write(*, '(A,755ES20.11)') ' EKF ', x
 
   case ('profile')
     ! chi^2 as a function of the Earth-Sun distance a_E, all other
@@ -2096,6 +2173,9 @@ contains
     print '(A)',  ' selection; JPL is printed only for comparison at the end.'
     print '(A)',  ' Elements 1-7 are those of the Earth-Moon barycentre about the Sun.'
     ! JPL's orbits in the same parametrization, for the comparison only
+    ! (not in the procedure, which has no JPL orbits)
+    xt = 0.0_dp
+    if (.not. alien) then
     block
       real(dp) :: pos(3,NBODY), vel(3,NBODY), gm(NBODY)
       real(dp), allocatable :: p1(:), p2(:)
@@ -2110,6 +2190,7 @@ contains
       print '(A,ES10.2,A)', ' (check of the barycentre elements: largest change of a prediction ', &
           maxval(abs(p1 - p2))*3600.0_dp, '")'
     end block
+    end if
 
     ! Diagnostic only (argument 9 = fromjpl): skip the build-up and start the
     ! final fit from JPL's orbits, to see whether the blind fit found the
@@ -2133,6 +2214,7 @@ contains
         close(un)
         xb = 0.0_dp; xb(18:19) = 1.0_dp; xb(22:23) = 1.0_dp; xb(25) = 1.0_dp; xb(27:28) = 1.0_dp; call one_scales(xb)
         read(ln, *, iostat=ios) tag, xb
+        if (ios /= 0) read(ln, *, iostat=ios) tag, xb(1:595)
         if (ios /= 0) read(ln, *, iostat=ios) tag, xb(1:345)
         if (ios /= 0) read(ln, *, iostat=ios) tag, xb(1:95)
         if (ios /= 0) read(ln, *, iostat=ios) tag, xb(1:91)
@@ -2337,8 +2419,11 @@ contains
       reff(3) = .true.; use_mdist = .true.; param_on(96 + 2*NMON:95 + 3*NMON) = .true.
     end if
     if (index(arg, 'rfar') > 0) then
-      reff(4) = .true.; use_mfar = .true.; param_on(96 + 3*NMON:NP) = .true.
+      reff(4) = .true.; use_mfar = .true.; param_on(96 + 3*NMON:IST0) = .true.
       use_dfar = .true.; param_on(90) = .true.
+    end if
+    if (index(arg, 'rstar') > 0) then
+      reff(5) = .true.; use_rstar = .true.; param_on(IST0 + 1:NP) = .true.
     end if
     if (index(arg, 'mdec') > 0) then
       use_mdec = .true.; param_on(96:95 + NMON) = .true.
@@ -2351,7 +2436,7 @@ contains
       use_mdist = .true.; param_on(96 + 2*NMON:95 + 3*NMON) = .true.
     end if
     if (index(arg, 'mfar') > 0) then
-      use_mfar = .true.; param_on(96 + 3*NMON:NP) = .true.
+      use_mfar = .true.; param_on(96 + 3*NMON:IST0) = .true.
     end if
     if (index(arg, 'malt') > 0) then
       use_malt = .true.; param_on(96 + NMON:95 + 2*NMON) = .true.
@@ -2439,7 +2524,7 @@ contains
         do kk = 1, 6
           call update_tau(xb, cv)
           call fit_lm(xb, v, act, 4.0_dp, cv, u, rms, .false.)
-          print '(A,I2,A,4F7.3,A,F14.1)', '      random effects, pass', kk, ':  tau (dec, alt, dist, far) ', tau_re, &
+          print '(A,I2,A,5F7.3,A,F14.1)', '      random effects, pass', kk, ':  tau (dec, alt, dist, far, star) ', tau_re, &
               "'   a_E ", xb(7)
         end do
       end if
@@ -2451,8 +2536,8 @@ contains
       call report(" BLIND FIT (nothing from JPL; JPL column for comparison only)", xb, sgv, xt)
       call print_sigmas()
       call write_blind_residuals(xb, u, v)
-      write(*, '(A,595ES20.11)') ' BLIND ', xb
-      write(*, '(A,595ES20.11)') ' BLINDSIG ', sgv
+      write(*, '(A,755ES20.11)') ' BLIND ', xb
+      write(*, '(A,755ES20.11)') ' BLINDSIG ', sgv
       block
         integer :: un, g
         open(newunit=un, file='sigmas_out.dat', status='replace', action='write')
@@ -2616,7 +2701,7 @@ contains
                    5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, &
                    (5.0_dp, 5.0_dp, 0.1_dp, 0.3_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, ii_ = 1, 5), &
                    1.0_dp, 0.1_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, &
-                   (5.0_dp, ii_ = 1, 4*NMON)]
+                   (5.0_dp, ii_ = 1, 4*NMON), (1.0_dp, ii_ = 1, 2*NSTAR)]
         call fit_iekf(xp, v, act, u, sigma_prior, 30, P)
         call predict_all(xp, pr)
         rr = 0.0_dp
@@ -2628,7 +2713,7 @@ contains
         end do
         print '(A,F12.2,A,F12.2)', '   chi2 ', rr, '   (batch least squares ', last_chi2, ')'
         call report(' Iterated EKF from the 1586 solution (filter 1-sigma)', xp, sgv, xt)
-        write(*, '(A,595ES20.11)') ' BLINDEKF ', xp
+        write(*, '(A,755ES20.11)') ' BLINDEKF ', xp
       end block
     end block
   end subroutine
@@ -2682,6 +2767,9 @@ contains
       write(ytok, '(A,I4)') 'no', obs(j)%year
       if (index(name, trim(ytok)) > 0) keep(j) = .false.
       if (index(name, 'moonstar') > 0) keep(j) = keep(j) .and. (obs(j)%body == 1 .or. obs(j)%tkind == 'S')
+      ! moonsm: the Moon timed by stars or read at the meridian (no clock needed)
+      if (index(name, 'moonsm') > 0) keep(j) = keep(j) .and. (obs(j)%body == 1 .or. obs(j)%tkind == 'S' .or. &
+          obs(j)%tkind == 'M')
       if (index(name, 'starsess') > 0 .and. obs(j)%body == 2) keep(j) = keep(j) .and. obs(j)%tkind == 'A' .and. &
           obs(j)%sess > 0 .and. any(obs(1:nobs)%body == 3 .and. obs(1:nobs)%sess == obs(j)%sess)
       ! notime: the Moon only by readings that hardly depend on the clock
