@@ -64,7 +64,12 @@ module tycho_fit_mod
   use constants_mod
   implicit none
 
-  integer, parameter :: NP_ORB = 14, NP_NUIS = 75, NP = NP_ORB + NP_NUIS
+  ! NMON 30-day windows from JD 2300000.5 (1585-1595): a declination zero
+  ! (x(96:220)), an altitude zero (x(221:345)), a zero of the Moon's
+  ! distances (x(346:470)) and an excess of the distances read to the far
+  ! limb (x(471:595)) of each window
+  integer, parameter :: NMON = 125
+  integer, parameter :: NP_ORB = 14, NP_NUIS = 81 + 4*NMON, NP = NP_ORB + NP_NUIS
   integer, parameter :: MAXOBS = 20000
   real(dp), parameter :: LAT0_DEG = 55.0_dp + 54.0_dp/60 + 27.0_dp/3600
   ! latitude used by the predictions: LAT0_DEG + x(20) (arcmin); refraction
@@ -102,6 +107,25 @@ module tycho_fit_mod
   ! "kew" (x(89)): the east and west limbs (and distances' near/far lit
   ! limbs) with their own radius scale instead of k_moon
   logical :: use_irr = .false., use_kew = .false.
+  ! "dfar" (x(90)), "dnear" (x(91)), arcmin: offsets of the Moon-star and
+  ! Moon-Sun distances read to the Moon's limb on the far side from the
+  ! other body (across the disk) and on the near side
+  logical :: use_dfar = .false., use_dnear = .false.
+  ! "limbew" (x(92:93)) / "limbo" (x(92:95)), arcmin: each named limb of the
+  ! Moon (W, E, U, L) read outward by its own amount, in every kind of
+  ! reading (the bright limb read differently on the two sides)
+  logical :: use_limbo = .false.
+  ! "decns": the upper/lower limb of a declination reading is the north/south one
+  logical :: dec_ns = .false.
+  ! "mdec" / "malt": the zero of the declinations / of the altitudes in each
+  ! 30-day window (Sun and Moon together; the year's own offset is then off)
+  logical :: use_mdec = .false., use_malt = .false., use_mdist = .false., use_mfar = .false.
+  ! reading being predicted, and whether a distance was read to the Moon's
+  ! far limb (set in predict_pt)
+  integer :: cur_i = 0
+  ! length of the windows, days (environment TYCHO_WIN, default 30)
+  real(dp) :: win_days = 30.0_dp
+  logical :: farlimb(MAXOBS) = .false.
   ! "nosunpar": the Sun seen from the Earth's centre (its 9" diurnal
   ! parallax, which also carries the Earth-Sun distance, left out), so
   ! that only the Moon's motion measures the distance
@@ -148,7 +172,7 @@ module tycho_fit_mod
   real(dp) :: earth_pole(3) = [0.0_dp, 0.0_dp, 1.0_dp]
   logical :: use_j2 = .true.
 
-  character(len=6), parameter :: PNAME(NP) = [character(len=6) :: &
+  character(len=6), parameter :: PNAME0(95) = [character(len=6) :: &
       'e_E', 'i_E', 'Om_E', 'w_E', 'M0_E', 'n_E', 'a_E', &
       'e_M', 'i_M', 'Om_M', 'w_M', 'M0_M', 'n_M', 'a_M', &
       'b_alt', 'b_d86', 'b_d95', 'k_moon', 'k_refr', 'd_lat', 'b_al95', 'k_mo95', 'k_re95', 'd_la95', 'h_atm', 'b_al94', 'k_mo94', 'k_re94', 'd_la94', 'b_d94', &
@@ -159,7 +183,8 @@ module tycho_fit_mod
       'b_al90', 'b_d90', 'k_mo90', 'k_re90', 'd_la90', 'ar_m90', 'ar_e90', 'qt90', 'az90', &
       'b_al91', 'b_d91', 'k_mo91', 'k_re91', 'd_la91', 'ar_m91', 'ar_e91', 'qt91', 'az91', &
       'b_al92', 'b_d92', 'k_mo92', 'k_re92', 'd_la92', 'ar_m92', 'ar_e92', 'qt92', 'az92', &
-      'irr', 'k_ew']
+      'irr', 'k_ew', 'd_far', 'd_near', 'o_W', 'o_E', 'o_U', 'o_L']
+  character(len=6) :: PNAME(NP)
 
   type :: reading
     character(len=12) :: id
@@ -247,6 +272,23 @@ contains
     ip_year = 0
     if (yidx(year) >= 4) ip_year = 43 + 9*(yidx(year) - 4) + j
   end function
+
+  ! 30-day window of a moment (1..NMON)
+  integer function mon_of(jd)
+    real(dp), intent(in) :: jd
+    mon_of = max(1, min(NMON, int((jd - 2300000.5_dp)/win_days) + 1))
+  end function
+
+  subroutine init_names()
+    integer :: k
+    PNAME(1:95) = PNAME0
+    do k = 1, NMON
+      write(PNAME(95 + k), '(A,I3.3)') 'dd', k
+      write(PNAME(95 + NMON + k), '(A,I3.3)') 'da', k
+      write(PNAME(95 + 2*NMON + k), '(A,I3.3)') 'di', k
+      write(PNAME(95 + 3*NMON + k), '(A,I3.3)') 'df', k
+    end do
+  end subroutine
 
   ! declination offset of a year
   integer function ip_dec(year)
@@ -352,6 +394,10 @@ contains
       H2 = H - sd/max(cos(d*DEG2RAD), 1.0d-6)
     case ('W')
       H2 = H + sd/max(cos(d*DEG2RAD), 1.0d-6)
+    case ('A')                                ! the limb toward the north pole
+      d2 = d + sd
+    case ('B')                                ! toward the south pole
+      d2 = d - sd
     end select
   end subroutine
 
@@ -412,6 +458,8 @@ contains
       end if
     case ('E'); ue = 1.0_dp; un = 0.0_dp
     case ('W'); ue = -1.0_dp; un = 0.0_dp
+    case ('A'); ue = 0.0_dp; un = 1.0_dp
+    case ('B'); ue = 0.0_dp; un = -1.0_dp
     case ('N', 'F')
       call sky_dir(H, d, Hx, dx, ue, un)
       if (pt == 'F') then
@@ -676,6 +724,7 @@ contains
     type(reading), intent(in) :: o
     real(dp), intent(in) :: x(NP), rsun(3), rmoon(3), vearth(3)
     real(dp) :: p, H, d, sd, Hl, dl, Hr, dr, a, A_az, Hs, ds, sds, Hc, dc, Ho, dov, Hsun, dsun, sdx, h1, h2
+    character(len=1) :: ptd
     if (o%body == 3) then
       ! a clock star's hour angle on the armillae
       call refract(wrap180(o%last - o%sra), o%sdec, Hr, dr)
@@ -699,12 +748,19 @@ contains
       end if
       call eq_to_hor(Hl, dl, a, A_az)
       p = a + refraction_deg(a) + x(iy(15, o%year))/60.0_dp
+      if (use_malt) p = p + x(95 + NMON + mon_of(o%jd))/60.0_dp
       if (use_ew) p = p + x(ip_ew(o%year, 0))/60.0_dp*sin(A_az*DEG2RAD)
     case ('DEC')
-      call limb_point(H, d, msd(o%point), o%point, Hl, dl)
+      ! on the armillae the upper and lower limbs of a declination are the
+      ! limbs toward the north and the south pole (dec_ns), not in altitude
+      ptd = o%point
+      if (dec_ns .and. ptd == 'U') ptd = 'A'
+      if (dec_ns .and. ptd == 'L') ptd = 'B'
+      call limb_point(H, d, msd(ptd), ptd, Hl, dl)
       call refract(Hl, dl, Hr, dr)
       call armil(Hr, dr, x, o%year, Hc, dr)
       p = dr + x(ip_dec(o%year))/60.0_dp
+      if (use_mdec) p = p + x(95 + mon_of(o%jd))/60.0_dp
     case ('HA')
       call limb_point(H, d, msd(o%point), o%point, Hl, dl)
       call refract(Hl, dl, Hr, dr)
@@ -735,14 +791,20 @@ contains
         call refract(H, d, Hc, dc)
         call refract(Hs, ds, Ho, dov)
         p = sep(Hc, dc, Ho, dov)
+        if (use_mdist .and. o%body == 2) p = p + x(95 + 2*NMON + mon_of(o%jd))/60.0_dp
         select case (o%point)
         case ('N'); p = p - lit_sd('N', H, d, sd, Hsun, dsun, Hs, ds)
         case ('F'); p = p + lit_sd('F', H, d, sd, Hsun, dsun, Hs, ds)
         case ('U', 'L', 'E', 'W')
           if (side(Hc, dc, Ho, dov, o%point) > 0.0_dp) then
             p = p - msd(o%point)
+            if (use_dnear) p = p + x(91)/60.0_dp
+            if (cur_i > 0) farlimb(cur_i) = .false.
           else
             p = p + msd(o%point)
+            if (use_dfar) p = p + x(90)/60.0_dp
+            if (cur_i > 0) farlimb(cur_i) = .true.
+            if (use_mfar .and. o%body == 2) p = p + x(95 + 3*NMON + mon_of(o%jd))/60.0_dp
           end if
         end select
         if (o%refpoint /= 'C' .and. sds > 0.0_dp) then
@@ -765,6 +827,14 @@ contains
       sd2 = sd
       if (use_kew .and. index('EWNF', pt) > 0) sd2 = sd*x(89)/x(iy(18, o%year))
       if (use_irr) sd2 = sd2 + x(88)/60.0_dp*0.5_dp*(1.0_dp - cos(sep(H, d, Hsun, dsun)*DEG2RAD))
+      if (use_limbo) then
+        select case (pt)
+        case ('W'); sd2 = sd2 + x(92)/60.0_dp
+        case ('E'); sd2 = sd2 + x(93)/60.0_dp
+        case ('U', 'A'); sd2 = sd2 + x(94)/60.0_dp
+        case ('L', 'B'); sd2 = sd2 + x(95)/60.0_dp
+        end select
+      end if
       sdl = lit_sd(pt, H, d, sd2, Hsun, dsun, 0.0_dp, 0.0_dp)
     end function
   end function
@@ -828,6 +898,7 @@ contains
     integer :: it
     real(dp), parameter :: SID_DEG_PER_S = 360.98564736629_dp/86400.0_dp
     o2 = obs(i)
+    cur_i = i
     call set_site(x, o2%year)
     rs0 = pos(:,1) - pos(:,2); rm0 = pos(:,3) - pos(:,2)
     elong(i) = modulo(atan2(rm0(2), rm0(1)) - atan2(rs0(2), rs0(1)), TAU)*RAD2DEG
@@ -1171,6 +1242,24 @@ contains
     fix_choice = .true.          ! the same limbs for the perturbed orbits
     do k = 1, NP
       if (.not. active(k) .or. .not. param_on(k)) cycle
+      if (k > 95) then
+        ! a window's zero: the prediction moves one-for-one (arcmin)
+        do i = 1, nobs
+          if (obs(i)%body == 3) cycle
+          if (k <= 95 + NMON) then
+            if (trim(obs(i)%qty) == 'DEC' .and. mon_of(obs(i)%jd) == k - 95) J(i, k) = 1.0_dp
+          else if (k <= 95 + 2*NMON) then
+            if (obs(i)%qty(1:3) == 'ALT' .and. mon_of(obs(i)%jd) == k - 95 - NMON) J(i, k) = 1.0_dp
+          else if (k <= 95 + 3*NMON) then
+            if (trim(obs(i)%qty) == 'DIST' .and. obs(i)%body == 2 .and. &
+                mon_of(obs(i)%jd) == k - 95 - 2*NMON) J(i, k) = 1.0_dp
+          else
+            if (trim(obs(i)%qty) == 'DIST' .and. obs(i)%body == 2 .and. farlimb(i) .and. &
+                mon_of(obs(i)%jd) == k - 95 - 3*NMON) J(i, k) = 1.0_dp
+          end if
+        end do
+        cycle
+      end if
       h = fd_step(x, k)
       xp = x; xp(k) = x(k) + h
       xm = x; xm(k) = x(k) - h
@@ -1263,6 +1352,7 @@ contains
         w = wr(i)/sigma_g(obs(i)%group)**2
         chi2 = chi2 + w*r(i)**2
         do k = 1, na
+          if (J(i, idx(k)) == 0.0_dp) cycle
           g(idx(k)) = g(idx(k)) + w*J(i, idx(k))*r(i)
           N(idx(k), idx(1:na)) = N(idx(k), idx(1:na)) + w*J(i, idx(k))*J(i, idx(1:na))
         end do
@@ -1539,6 +1629,14 @@ program tycho_fit
     if (index(arg, '+mass') > 0) moon_ratio = 0.0123000371_dp   ! Moon/Earth mass ratio
     if (index(arg, '+ell') > 0) use_ell = .true.            ! WGS84 ellipsoid for the observer
   end if
+  call init_names()
+  block
+    character(len=32) :: wv
+    integer :: st
+    call get_environment_variable('TYCHO_WIN', wv, status=st)
+    if (st == 0 .and. len_trim(wv) > 0) read(wv, *) win_days
+    if (win_days /= 30.0_dp) print '(A,F6.1,A)', '   windows of ', win_days, ' days'
+  end block
   call setup_observer()
   call read_obs(trim(obs_file))
   call read_state(trim(state_file), x_true)
@@ -1640,8 +1738,8 @@ program tycho_fit
     call report(" Fitted orbits from Tycho's readings (formal 1-sigma)", x, sig, x_true)
     call print_sigmas()
     call write_residuals(x, use)
-    write(*, '(A,89ES20.11)') ' FIT ', x
-    write(*, '(A,89ES20.11)') ' SIG ', sig
+    write(*, '(A,595ES20.11)') ' FIT ', x
+    write(*, '(A,595ES20.11)') ' SIG ', sig
     print '(/A)', ' Iterated extended Kalman filter (sequential updates, F = I, Q = 0), same readings and weights'
     sigma_prior = [0.05_dp, 0.05_dp, 0.05_dp, 0.5_dp, 0.5_dp, 1.0d-4, 1.0d7, &
                    0.05_dp, 0.05_dp, 0.05_dp, 0.5_dp, 0.5_dp, 1.0d-2, 4.0d4, 5.0_dp, 5.0_dp, 5.0_dp, &
@@ -1649,7 +1747,8 @@ program tycho_fit
                    5.0_dp, 0.1_dp, 0.3_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, &
                    5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, &
                    (5.0_dp, 5.0_dp, 0.1_dp, 0.3_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, ii_ = 1, 5), &
-                   1.0_dp, 0.1_dp]
+                   1.0_dp, 0.1_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, &
+                   (5.0_dp, ii_ = 1, 4*NMON)]
     x = x0
     call fit_iekf(x, values, active, use, sigma_prior, 30, P)
     do k = 1, NP
@@ -1664,7 +1763,7 @@ program tycho_fit
     end do
     print '(A,F8.3,A,F12.2)', '   rms residual ', sqrt(rms/n), "'   chi2 ", r
     call report(' Iterated EKF result (1-sigma from the filter covariance)', x, sig, x_true)
-    write(*, '(A,89ES20.11)') ' EKF ', x
+    write(*, '(A,595ES20.11)') ' EKF ', x
 
   case ('profile')
     ! chi^2 as a function of the Earth-Sun distance a_E, all other
@@ -1786,6 +1885,10 @@ contains
         close(un)
         xb = 0.0_dp; xb(18:19) = 1.0_dp; xb(22:23) = 1.0_dp; xb(25) = 1.0_dp; xb(27:28) = 1.0_dp; call one_scales(xb)
         read(ln, *, iostat=ios) tag, xb
+        if (ios /= 0) read(ln, *, iostat=ios) tag, xb(1:345)
+        if (ios /= 0) read(ln, *, iostat=ios) tag, xb(1:95)
+        if (ios /= 0) read(ln, *, iostat=ios) tag, xb(1:91)
+        if (ios /= 0) read(ln, *, iostat=ios) tag, xb(1:89)
         if (ios /= 0) read(ln, *, iostat=ios) tag, xb(1:87)
         if (ios /= 0) read(ln, *, iostat=ios) tag, xb(1:42)
         if (ios /= 0) read(ln, *, iostat=ios) tag, xb(1:36)
@@ -1970,6 +2073,39 @@ contains
     if (index(arg, 'kew') > 0) then
       use_kew = .true.; param_on(89) = .true.
     end if
+    if (index(arg, 'dfar') > 0) then
+      use_dfar = .true.; param_on(90) = .true.
+    end if
+    if (index(arg, 'decns') > 0) dec_ns = .true.
+    if (index(arg, 'mdec') > 0) then
+      use_mdec = .true.; param_on(96:95 + NMON) = .true.
+      param_on([16, 17, 30]) = .false.
+      do k1 = 4, NY
+        param_on(ip_year(YEARS(k1), 1)) = .false.
+      end do
+    end if
+    if (index(arg, 'mdist') > 0) then
+      use_mdist = .true.; param_on(96 + 2*NMON:95 + 3*NMON) = .true.
+    end if
+    if (index(arg, 'mfar') > 0) then
+      use_mfar = .true.; param_on(96 + 3*NMON:NP) = .true.
+    end if
+    if (index(arg, 'malt') > 0) then
+      use_malt = .true.; param_on(96 + NMON:95 + 2*NMON) = .true.
+      param_on([15, 21, 26]) = .false.
+      do k1 = 4, NY
+        param_on(ip_year(YEARS(k1), 0)) = .false.
+      end do
+    end if
+    if (index(arg, 'limbew') > 0) then
+      use_limbo = .true.; param_on(92:93) = .true.
+    end if
+    if (index(arg, 'limbo') > 0) then
+      use_limbo = .true.; param_on(92:95) = .true.
+    end if
+    if (index(arg, 'dnear') > 0) then
+      use_dnear = .true.; param_on(91) = .true.
+    end if
     if (index(arg, 'armil') > 0) then
       use_armil = .true.; param_on(31:36) = .true.
       do k1 = 4, NY
@@ -2040,8 +2176,8 @@ contains
       call report(" BLIND FIT (nothing from JPL; JPL column for comparison only)", xb, sgv, xt)
       call print_sigmas()
       call write_blind_residuals(xb, u, v)
-      write(*, '(A,89ES20.11)') ' BLIND ', xb
-      write(*, '(A,89ES20.11)') ' BLINDSIG ', sgv
+      write(*, '(A,595ES20.11)') ' BLIND ', xb
+      write(*, '(A,595ES20.11)') ' BLINDSIG ', sgv
       block
         integer :: un, g
         open(newunit=un, file='sigmas_out.dat', status='replace', action='write')
@@ -2076,6 +2212,7 @@ contains
             call fit_lm(xb, v, act, 4.0_dp, cv, u, rr, .false.)
             act(7) = .true.; sigma_g = sgf2
             freeze_sigma = .false.; freeze_use = .false.
+            call write_blind_residuals(xb, u, v)     ! the residuals at the given a_E
           end if
           call jacobian(xb, v, Jm, rr0, act)
           na2 = 0
@@ -2155,7 +2292,8 @@ contains
                    5.0_dp, 0.1_dp, 0.3_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, &
                    5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, &
                    (5.0_dp, 5.0_dp, 0.1_dp, 0.3_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, ii_ = 1, 5), &
-                   1.0_dp, 0.1_dp]
+                   1.0_dp, 0.1_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, &
+                   (5.0_dp, ii_ = 1, 4*NMON)]
         call fit_iekf(xp, v, act, u, sigma_prior, 30, P)
         call predict_all(xp, pr)
         rr = 0.0_dp
@@ -2167,7 +2305,7 @@ contains
         end do
         print '(A,F12.2,A,F12.2)', '   chi2 ', rr, '   (batch least squares ', last_chi2, ')'
         call report(' Iterated EKF from the 1586 solution (filter 1-sigma)', xp, sgv, xt)
-        write(*, '(A,89ES20.11)') ' BLINDEKF ', xp
+        write(*, '(A,595ES20.11)') ' BLINDEKF ', xp
       end block
     end block
   end subroutine
@@ -2242,6 +2380,12 @@ contains
         if (index(name, 'xALT') > 0 .and. obs(j)%qty(1:3) == 'ALT') keep(j) = .false.
         if (index(name, 'xAZ') > 0 .and. trim(obs(j)%qty) == 'AZ') keep(j) = .false.
       end if
+      ! noupdec: no declinations of the Moon's upper limb; nowdist: no
+      ! distances from its west limb
+      if (obs(j)%body == 2 .and. index(name, 'noupdec') > 0 .and. trim(obs(j)%qty) == 'DEC' .and. &
+          obs(j)%point == 'U') keep(j) = .false.
+      if (obs(j)%body == 2 .and. index(name, 'nowdist') > 0 .and. trim(obs(j)%qty) == 'DIST' .and. &
+          obs(j)%point == 'W') keep(j) = .false.
       ! nocres: no Moon readings at a crescent (within 70 deg of the Sun)
       if (index(name, 'nocres') > 0 .and. obs(j)%body == 2) keep(j) = keep(j) .and. &
           elong(j) > 70.0_dp .and. elong(j) < 290.0_dp
@@ -2398,7 +2542,7 @@ contains
       case (2:5, 9:12); f = RAD2DEG; unit = 'deg'
       case (6, 13);     f = RAD2DEG; unit = 'deg/day'
       case (7, 14);     f = 1.0_dp;  unit = 'km'
-      case (15:17, 20, 21, 24, 26, 29:44, 47:53, 56:62, 65:71, 74:80, 83:88); f = 1.0_dp;  unit = 'arcmin'
+      case (15:17, 20, 21, 24, 26, 29:44, 47:53, 56:62, 65:71, 74:80, 83:88, 90:NP); f = 1.0_dp;  unit = 'arcmin'
       case default;     f = 1.0_dp;  unit = ''
       end select
       print '(3X,A6,ES17.9,ES14.4,ES17.9,ES12.3,F9.2,2X,A)', PNAME(k2), xf(k2)*f, sg(k2)*f, xt(k2)*f, &
