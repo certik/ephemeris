@@ -292,9 +292,17 @@ a comma list of what else to fit: `moonr` (the Moon's radius, otherwise
 `tycho` (nothing but Tycho's values: for `tycho_obs_tycho.dat`, no aberration
 or J2, a massless Moon, a spherical Earth, Cassini's refraction with its
 height fitted too), `huber` / `tukey` / `noclip` (weighting of the final fit
-instead of rejecting beyond 4 sigma);
+instead of rejecting beyond 4 sigma), `armil` (the armillary sphere's
+polar axis tilted along the meridian and east-west, each year, x(31:36)),
+`nosunpar` (the Sun seen from the Earth's centre: only the Moon measures
+the distance);
 argument 12 is the subset for the final fit: `all`, `y1586`, `y1595`, or
-`moonstar` (Moon readings only where the stars give the time).
+`moonstar` (Moon readings only where the stars give the time); tokens
+joined by `+` combine: `y1586`, `y1594`, `y1595`, `no1594`, `moonstar`,
+`starsess` (the Moon only in sessions with clock stars, for
+`tycho_obs_tycho_fitclock.dat`, whose X rows are those stars' hour angles,
+used only to set each session's clock), `notime` (the Moon only by meridian
+altitudes, declinations, diameters; `+dist` adds distances), `old1586`.
 
 **Inputs:** `tycho_obs_*arcmin.dat` or `tycho_obs_blind.dat`, `jpl_state.dat`  
 **Output:** log on stdout, `tycho_fit_residuals.dat` / `tycho_blind_residuals.dat`

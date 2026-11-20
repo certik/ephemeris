@@ -64,7 +64,7 @@ module tycho_fit_mod
   use constants_mod
   implicit none
 
-  integer, parameter :: NP_ORB = 14, NP_NUIS = 16, NP = NP_ORB + NP_NUIS
+  integer, parameter :: NP_ORB = 14, NP_NUIS = 22, NP = NP_ORB + NP_NUIS
   integer, parameter :: MAXOBS = 20000
   real(dp), parameter :: LAT0_DEG = 55.0_dp + 54.0_dp/60 + 27.0_dp/3600
   ! latitude used by the predictions: LAT0_DEG + x(20) (arcmin); refraction
@@ -73,9 +73,19 @@ module tycho_fit_mod
   real(dp) :: lat_deg = LAT0_DEG, ref_scale = 1.0_dp
   ! x(26:29): 1594's altitude offset, Moon radius, refraction, latitude
   ! (peryear); x(30): 1594's declination offset
-  logical :: param_on(30) = [.true., .true., .true., .true., .true., .true., .true., .true., .true., &
+  logical :: param_on(NP) = [.true., .true., .true., .true., .true., .true., .true., .true., .true., &
       .true., .true., .true., .true., .true., .true., .true., .true., .false., .false., .false., &
-      .false., .false., .false., .false., .false., .false., .false., .false., .false., .true.]
+      .false., .false., .false., .false., .false., .false., .false., .false., .false., .true., &
+      .false., .false., .false., .false., .false., .false.]
+  ! x(31:36): tilt of the armillary sphere's polar axis (arcmin) along the
+  ! meridian and east-west, for 1586, 1594, 1595 ("armil"); applied to every
+  ! reading on the armillae (declinations, hour angles, RA differences and
+  ! the clock stars)
+  logical :: use_armil = .false.
+  ! "nosunpar": the Sun seen from the Earth's centre (its 9" diurnal
+  ! parallax, which also carries the Earth-Sun distance, left out), so
+  ! that only the Moon's motion measures the distance
+  logical :: no_sun_par = .false.
   ! "tycho" model (argument 11): nothing but Tycho's values and physics --
   ! no aberration, no J2, a massless Moon, a spherical Earth (distances in
   ! Earth radii; km only as the unit 6378.137), Cassini's homogeneous
@@ -117,7 +127,8 @@ module tycho_fit_mod
   character(len=6), parameter :: PNAME(NP) = [character(len=6) :: &
       'e_E', 'i_E', 'Om_E', 'w_E', 'M0_E', 'n_E', 'a_E', &
       'e_M', 'i_M', 'Om_M', 'w_M', 'M0_M', 'n_M', 'a_M', &
-      'b_alt', 'b_d86', 'b_d95', 'k_moon', 'k_refr', 'd_lat', 'b_al95', 'k_mo95', 'k_re95', 'd_la95', 'h_atm', 'b_al94', 'k_mo94', 'k_re94', 'd_la94', 'b_d94']
+      'b_alt', 'b_d86', 'b_d95', 'k_moon', 'k_refr', 'd_lat', 'b_al95', 'k_mo95', 'k_re95', 'd_la95', 'h_atm', 'b_al94', 'k_mo94', 'k_re94', 'd_la94', 'b_d94', &
+      'ar_m86', 'ar_e86', 'ar_m94', 'ar_e94', 'ar_m95', 'ar_e95']
 
   type :: reading
     character(len=12) :: id
@@ -273,6 +284,26 @@ contains
     case ('W')
       H2 = H + sd/max(cos(d*DEG2RAD), 1.0d-6)
     end select
+  end subroutine
+
+  ! Hour angle and declination as read on an armillary sphere whose polar
+  ! axis is tilted by am (along the meridian) and ae (east-west), arcmin
+  subroutine armil(H, d, x, year, H2, d2)
+    real(dp), intent(in) :: H, d, x(NP)
+    integer, intent(in) :: year
+    real(dp), intent(out) :: H2, d2
+    real(dp) :: u(3), v(3), am, ae
+    integer :: k
+    if (.not. use_armil) then
+      H2 = H; d2 = d; return
+    end if
+    k = 2*(yidx(year) - 1)
+    am = x(31 + k)/60.0_dp*DEG2RAD; ae = x(32 + k)/60.0_dp*DEG2RAD
+    u = [cos(d*DEG2RAD)*cos(H*DEG2RAD), cos(d*DEG2RAD)*sin(H*DEG2RAD), sin(d*DEG2RAD)]
+    v = [u(1)*cos(am) - u(3)*sin(am), u(2), u(1)*sin(am) + u(3)*cos(am)]
+    u = [v(1), v(2)*cos(ae) + v(3)*sin(ae), -v(2)*sin(ae) + v(3)*cos(ae)]
+    H2 = atan2(u(2), u(1))*RAD2DEG
+    d2 = asin(max(-1.0_dp, min(1.0_dp, u(3))))*RAD2DEG
   end subroutine
 
   function sep(H1, d1, H2, d2) result(s)
@@ -454,8 +485,9 @@ contains
   end subroutine
 
   ! ── Topocentric apparent (H, dec, semidiameter) of a body ───────────
-  subroutine topo(rb_icrs, v_earth, o, H, d, sd, radius)
+  subroutine topo(rb_icrs, v_earth, o, H, d, sd, radius, geo)
     real(dp), intent(in) :: rb_icrs(3), v_earth(3), radius
+    logical, intent(in), optional :: geo   ! no diurnal parallax
     type(reading), intent(in) :: o
     real(dp), intent(out) :: H, d, sd
     real(dp) :: r(3), u(3), dn, rd(3), ob(3), lst, ra
@@ -465,6 +497,9 @@ contains
     rd = matmul(o%M, r)
     lst = o%last*DEG2RAD
     ob = [coslat_rho*cos(lst), coslat_rho*sin(lst), sinlat_rho]
+    if (present(geo)) then
+      if (geo) ob = 0.0_dp
+    end if
     rd = rd - ob
     dn = norm2(rd)
     ra = atan2(rd(2), rd(1))*RAD2DEG
@@ -519,8 +554,14 @@ contains
     type(reading), intent(in) :: o
     real(dp), intent(in) :: x(NP), rsun(3), rmoon(3), vearth(3)
     real(dp) :: p, H, d, sd, Hl, dl, Hr, dr, a, A_az, Hs, ds, sds, Hc, dc, Ho, dov
+    if (o%body == 3) then
+      ! a clock star's hour angle on the armillae
+      call refract(wrap180(o%last - o%sra), o%sdec, Hr, dr)
+      call armil(Hr, dr, x, o%year, p, dc)
+      return
+    end if
     if (o%body == 1) then
-      call topo(rsun, vearth, o, H, d, sd, merge(x(7)*sin(SUN_SD_RAD), SUN_RADIUS, tycho_model))
+      call topo(rsun, vearth, o, H, d, sd, merge(x(7)*sin(SUN_SD_RAD), SUN_RADIUS, tycho_model), no_sun_par)
     else
       call topo(rmoon, vearth, o, H, d, sd, MOON_RADIUS*x(iy(18, o%year)))
     end if
@@ -537,11 +578,12 @@ contains
     case ('DEC')
       call limb_point(H, d, sd, o%point, Hl, dl)
       call refract(Hl, dl, Hr, dr)
+      call armil(Hr, dr, x, o%year, Hc, dr)
       p = dr + x(merge(16, merge(30, 17, o%year == 1594), o%year == 1586))/60.0_dp
     case ('HA')
       call limb_point(H, d, sd, o%point, Hl, dl)
       call refract(Hl, dl, Hr, dr)
-      p = Hr
+      call armil(Hr, dr, x, o%year, p, dc)
     case ('AZ')
       call limb_point(H, d, sd, o%point, Hl, dl)
       call refract(Hl, dl, Hr, dr)
@@ -553,13 +595,15 @@ contains
       if (trim(o%refkind) == 'STAR') then
         Hs = wrap180(o%last - o%sra); ds = o%sdec; sds = 0.0_dp
       else
-        call topo(rsun, vearth, o, Hs, ds, sds, SUN_RADIUS)
+        call topo(rsun, vearth, o, Hs, ds, sds, SUN_RADIUS, no_sun_par)
       end if
       if (trim(o%qty) == 'RADIFF') then
         call limb_point(H, d, sd, o%point, Hl, dl)
-        call refract(Hl, dl, Hr, dr)
+        call refract(Hl, dl, Hc, dc)
+        call armil(Hc, dc, x, o%year, Hr, dr)
         call limb_point(Hs, ds, sds, o%refpoint, Hl, dl)
-        call refract(Hl, dl, Ho, dov)
+        call refract(Hl, dl, Hc, dc)
+        call armil(Hc, dc, x, o%year, Ho, dov)
         p = wrap180(Ho - Hr)
       else
         call refract(H, d, Hc, dc)
@@ -641,10 +685,10 @@ contains
       rm = rm0 + vm0*dt + 0.5_dp*am0*dt**2
       o2%last = obs(i)%last + SID_DEG_PER_S*dt
       if (o2%tkind == 'A') then
-        call topo(rs, vel(:,2), o2, H, d, sd, SUN_RADIUS)
+        call topo(rs, vel(:,2), o2, H, d, sd, SUN_RADIUS, no_sun_par)
         target = (o2%lat_h + o2%dclock/60.0_dp - 12.0_dp)*15.0_dp; rate = 360.0_dp
       else if (o2%body == 1) then
-        call topo(rs, vel(:,2), o2, H, d, sd, SUN_RADIUS)
+        call topo(rs, vel(:,2), o2, H, d, sd, SUN_RADIUS, no_sun_par)
         target = 0.0_dp; rate = 360.0_dp
       else
         call topo(rm, vel(:,2), o2, H, d, sd, MOON_RADIUS)
@@ -708,9 +752,10 @@ contains
         print *, 'cannot parse: ', trim(line(1:80)); cycle
       end if
       o%body = merge(1, 2, b == 'S')
+      if (b == 'X') o%body = 3          ! a clock star (hour angle), used only for the clocks
       o%M = transpose(reshape(m9, [3, 3]))
       o%group_err = err
-      o%group = (yidx(o%year) - 1)*2*NQ + (o%body - 1)*NQ + qindex(o%qty)
+      o%group = (yidx(o%year) - 1)*2*NQ + (min(o%body, 2) - 1)*NQ + qindex(o%qty)
       ! blind files carry three more columns: tkind lat_h sgn
       o%tkind = 'S'; o%lat_h = 0.0_dp; o%sgn = '+'; o%sess = 0; o%clk = '-'; o%dclock = 0.0_dp
       read(line, *, iostat=ios) o%id, o%year, b, o%qty, o%point, o%refkind, o%refpoint, &
@@ -833,7 +878,7 @@ contains
     x_true(15:17) = 0.0_dp
     x_true(18:19) = 1.0_dp; x_true(20) = 0.0_dp
     x_true(21) = 0.0_dp; x_true(22:23) = 1.0_dp; x_true(24) = 0.0_dp; x_true(25) = 1.0_dp
-    x_true(26) = 0.0_dp; x_true(27:28) = 1.0_dp; x_true(29:30) = 0.0_dp
+    x_true(26) = 0.0_dp; x_true(27:28) = 1.0_dp; x_true(29:30) = 0.0_dp; x_true(31:36) = 0.0_dp
   end subroutine
 
   subroutine setup_observer()
@@ -860,7 +905,7 @@ contains
     do g = 1, NG
       n = 0
       do i = 1, nobs
-        if (obs(i)%group == g .and. use(i)) then
+        if (obs(i)%group == g .and. use(i) .and. obs(i)%body /= 3) then
           n = n + 1; v(n) = abs(r(i))
         end if
       end do
@@ -1017,6 +1062,7 @@ contains
         end select
         if (robust_kind == 2 .and. .not. freeze_use) use(i) = wr(i) > 0.0_dp
         if (robust_kind == 2 .and. freeze_use .and. use(i)) wr(i) = max(wr(i), 1.0d-3)
+        if (obs(i)%body == 3) use(i) = .false.     ! clock stars are not fitted
       end do
       chi2 = 0.0_dp; N = 0.0_dp; g = 0.0_dp
       do i = 1, nobs
@@ -1134,7 +1180,7 @@ contains
     end do
     isclk = .false.
     do i = 1, nobs
-      if (obs(i)%tkind /= 'A' .or. obs(i)%sess == 0 .or. obs(i)%body /= 1 .or. obs(i)%clk == 'x') cycle
+      if (obs(i)%tkind /= 'A' .or. obs(i)%sess == 0 .or. obs(i)%body == 2 .or. obs(i)%clk == 'x') cycle
       if (trim(obs(i)%qty) /= 'HA' .and. trim(obs(i)%qty) /= 'ALT' .and. trim(obs(i)%qty) /= 'AZ') cycle
       if (trim(obs(i)%qty) == 'ALT' .and. obs(i)%value < 5.0_dp) cycle
       rate = resid_arcmin(obs(i), p1(i), p0(i))          ! arcmin per minute of time
@@ -1289,6 +1335,7 @@ program tycho_fit
   call get_command_argument(7, arg); if (trim(arg) == 'noplanets') use_planets = .false.
 
   call get_command_argument(11, arg)
+  if (index(arg, 'nosunpar') > 0) no_sun_par = .true.
   if (index(arg, 'tycho') > 0) then
     tycho_model = .true.; use_aberr = .false.; use_j2 = .false.; moon_ratio = 0.0_dp
   end if
@@ -1356,7 +1403,7 @@ program tycho_fit
       call add_noise(pred, synth, mc)
       x = start_guess(x_true)
       call fit_lm(x, synth, active, 0.0_dp, cov, use, rms, .false.)
-      write(*, '(A,I5,30ES20.11)') ' MC ', mc, x - x_true
+      write(*, '(A,I5,36ES20.11)') ' MC ', mc, x - x_true
     end do
 
   case ('fit')
@@ -1371,13 +1418,13 @@ program tycho_fit
     call report(" Fitted orbits from Tycho's readings (formal 1-sigma)", x, sig, x_true)
     call print_sigmas()
     call write_residuals(x, use)
-    write(*, '(A,30ES20.11)') ' FIT ', x
-    write(*, '(A,30ES20.11)') ' SIG ', sig
+    write(*, '(A,36ES20.11)') ' FIT ', x
+    write(*, '(A,36ES20.11)') ' SIG ', sig
     print '(/A)', ' Iterated extended Kalman filter (sequential updates, F = I, Q = 0), same readings and weights'
     sigma_prior = [0.05_dp, 0.05_dp, 0.05_dp, 0.5_dp, 0.5_dp, 1.0d-4, 1.0d7, &
                    0.05_dp, 0.05_dp, 0.05_dp, 0.5_dp, 0.5_dp, 1.0d-2, 4.0d4, 5.0_dp, 5.0_dp, 5.0_dp, &
                    0.1_dp, 0.3_dp, 5.0_dp, 5.0_dp, 0.1_dp, 0.3_dp, 5.0_dp, 0.3_dp, &
-                   5.0_dp, 0.1_dp, 0.3_dp, 5.0_dp, 5.0_dp]
+                   5.0_dp, 0.1_dp, 0.3_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp]
     x = x0
     call fit_iekf(x, values, active, use, sigma_prior, 30, P)
     do k = 1, NP
@@ -1392,7 +1439,7 @@ program tycho_fit
     end do
     print '(A,F8.3,A,F12.2)', '   rms residual ', sqrt(rms/n), "'   chi2 ", r
     call report(' Iterated EKF result (1-sigma from the filter covariance)', x, sig, x_true)
-    write(*, '(A,30ES20.11)') ' EKF ', x
+    write(*, '(A,36ES20.11)') ' EKF ', x
 
   case ('profile')
     ! chi^2 as a function of the Earth-Sun distance a_E, all other
@@ -1514,6 +1561,7 @@ contains
         close(un)
         xb = 0.0_dp; xb(18:19) = 1.0_dp; xb(22:23) = 1.0_dp; xb(25) = 1.0_dp; xb(27:28) = 1.0_dp
         read(ln, *, iostat=ios) tag, xb
+        if (ios /= 0) read(ln, *, iostat=ios) tag, xb(1:30)
         if (ios /= 0) then
           read(ln, *, iostat=ios) tag, xb(1:25)
           ! a file without 1594: start 1594 from 1595's constants
@@ -1679,6 +1727,10 @@ contains
     param_on(19) = index(arg, 'refr') > 0
     param_on(20) = index(arg, 'lat') > 0
     param_on(25) = param_on(19) .and. tycho_model   ! Cassini's height with the refraction
+    !   armil    the tilts of the armillary sphere's axis, each year
+    if (index(arg, 'armil') > 0) then
+      use_armil = .true.; param_on(31:36) = .true.
+    end if
     !   huber / tukey / noclip  weighting of the final fit (default: reject
     !            beyond 4 sigma)
     if (index(arg, 'huber') > 0) robust_kind = 1
@@ -1739,8 +1791,8 @@ contains
       call report(" BLIND FIT (nothing from JPL; JPL column for comparison only)", xb, sgv, xt)
       call print_sigmas()
       call write_blind_residuals(xb, u, v)
-      write(*, '(A,30ES20.11)') ' BLIND ', xb
-      write(*, '(A,30ES20.11)') ' BLINDSIG ', sgv
+      write(*, '(A,36ES20.11)') ' BLIND ', xb
+      write(*, '(A,36ES20.11)') ' BLINDSIG ', sgv
 
       ! χ² profile in a_E around the blind solution (weights and readings fixed)
       block
@@ -1771,7 +1823,7 @@ contains
         sigma_prior = [0.05_dp, 0.05_dp, 0.05_dp, 0.5_dp, 0.5_dp, 1.0d-4, 1.0d7, &
                        0.05_dp, 0.05_dp, 0.05_dp, 0.5_dp, 0.5_dp, 1.0d-2, 4.0d4, 5.0_dp, 5.0_dp, 5.0_dp, &
                    0.1_dp, 0.3_dp, 5.0_dp, 5.0_dp, 0.1_dp, 0.3_dp, 5.0_dp, 0.3_dp, &
-                   5.0_dp, 0.1_dp, 0.3_dp, 5.0_dp, 5.0_dp]
+                   5.0_dp, 0.1_dp, 0.3_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp]
         call fit_iekf(xp, v, act, u, sigma_prior, 30, P)
         call predict_all(xp, pr)
         rr = 0.0_dp
@@ -1783,7 +1835,7 @@ contains
         end do
         print '(A,F12.2,A,F12.2)', '   chi2 ', rr, '   (batch least squares ', last_chi2, ')'
         call report(' Iterated EKF from the 1586 solution (filter 1-sigma)', xp, sgv, xt)
-        write(*, '(A,30ES20.11)') ' BLINDEKF ', xp
+        write(*, '(A,36ES20.11)') ' BLINDEKF ', xp
       end block
     end block
   end subroutine
@@ -1833,6 +1885,13 @@ contains
       if (index(name, 'y1595') > 0) keep(j) = keep(j) .and. obs(j)%year == 1595
       if (index(name, 'no1594') > 0) keep(j) = keep(j) .and. obs(j)%year /= 1594
       if (index(name, 'moonstar') > 0) keep(j) = keep(j) .and. (obs(j)%body == 1 .or. obs(j)%tkind == 'S')
+      if (index(name, 'starsess') > 0 .and. obs(j)%body == 2) keep(j) = keep(j) .and. obs(j)%tkind == 'A' .and. &
+          obs(j)%sess > 0 .and. any(obs(1:nobs)%body == 3 .and. obs(1:nobs)%sess == obs(j)%sess)
+      ! notime: the Moon only by readings that hardly depend on the clock
+      ! (meridian altitudes, declinations, diameters; +dist: and distances)
+      if (index(name, 'notime') > 0 .and. obs(j)%body == 2) keep(j) = keep(j) .and. &
+          (trim(obs(j)%qty) == 'ALTM' .or. trim(obs(j)%qty) == 'DEC' .or. trim(obs(j)%qty) == 'DIAM' .or. &
+           (index(name, 'dist') > 0 .and. trim(obs(j)%qty) == 'DIST'))
       if (index(name, 'old1586') > 0) keep(j) = keep(j) .and. &
           .not. (obs(j)%id(1:5) == 'm86c:' .or. obs(j)%id(1:5) == 'm86d:')
     end do
@@ -1862,10 +1921,13 @@ contains
     v = obs(1:nobs)%value
     call fit_lm(xr, v, act, clp, cv, u, rr, .false.)
     call predict_all(xr, pr)
+    nused = 0
     do j = 1, nobs
-      ar(j) = abs(dresid(obs(j), v(j), pr(j)))
+      if (obs(j)%body == 3) cycle
+      nused = nused + 1
+      ar(nused) = abs(dresid(obs(j), v(j), pr(j)))
     end do
-    score = median(ar)
+    score = median(ar(1:nused))
     nused = count(u)
   end subroutine
 
@@ -1876,6 +1938,7 @@ contains
     integer :: j, na, nb
     na = 0; nb = 0
     do j = 1, nobs
+      if (obs(j)%body == 3) cycle
       if (obs(j)%year == 1586) then
         na = na + 1; a(na) = abs(dresid(obs(j), v(j), pr(j)))
       else
@@ -1981,7 +2044,7 @@ contains
       case (2:5, 9:12); f = RAD2DEG; unit = 'deg'
       case (6, 13);     f = RAD2DEG; unit = 'deg/day'
       case (7, 14);     f = 1.0_dp;  unit = 'km'
-      case (15:17, 20, 21, 24, 26, 29, 30); f = 1.0_dp;  unit = 'arcmin'
+      case (15:17, 20, 21, 24, 26, 29:36); f = 1.0_dp;  unit = 'arcmin'
       case default;     f = 1.0_dp;  unit = ''
       end select
       print '(3X,A6,ES17.9,ES14.4,ES17.9,ES12.3,F9.2,2X,A)', PNAME(k2), xf(k2)*f, sg(k2)*f, xt(k2)*f, &
