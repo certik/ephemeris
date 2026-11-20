@@ -45,6 +45,10 @@
 !  and limbs chosen by the model, no planets, the Earth-Moon barycentre's
 !  elements, and orbits built up from ellipses fitted to the readings
 !  (see blind_fit below).  JPL's state is read only for the comparison.
+!  Optionally the Moon's radius x(18), the strength of refraction x(19)
+!  and Uraniborg's latitude x(20) are fitted too, per year if asked
+!  (x(21:24) for 1595), and the final fit can be restarted from an earlier
+!  solution on a subset of the readings (arguments 9, 11, 12).
 !
 !  Build and run:
 !    gfortran -O3 -ffree-line-length-none -J build/tycho -o build/tycho/tycho_fit \
@@ -55,9 +59,22 @@ module tycho_fit_mod
   use constants_mod
   implicit none
 
-  integer, parameter :: NP_ORB = 14, NP_NUIS = 3, NP = NP_ORB + NP_NUIS
+  integer, parameter :: NP_ORB = 14, NP_NUIS = 10, NP = NP_ORB + NP_NUIS
   integer, parameter :: MAXOBS = 20000
-  real(dp), parameter :: LAT_DEG = 55.0_dp + 54.0_dp/60 + 27.0_dp/3600
+  real(dp), parameter :: LAT0_DEG = 55.0_dp + 54.0_dp/60 + 27.0_dp/3600
+  ! latitude used by the predictions: LAT0_DEG + x(20) (arcmin); refraction
+  ! scaled by x(19); the Moon's radius MOON_RADIUS*x(18).  Set from x at the
+  ! start of predict_all.  x(18:20) are fitted only where param_on allows.
+  real(dp) :: lat_deg = LAT0_DEG, ref_scale = 1.0_dp
+  logical :: param_on(24) = [.true., .true., .true., .true., .true., .true., .true., .true., .true., &
+      .true., .true., .true., .true., .true., .true., .true., .true., .false., .false., .false., &
+      .false., .false., .false., .false.]
+  ! peryear: the 1595 readings have their own altitude offset, Moon radius,
+  ! refraction and latitude, x(21:24) (otherwise x(15), x(18:20) for both)
+  logical :: peryear = .false.
+  ! elongation of the Moon from the Sun (deg, 0-360, eastward, in right
+  ! ascension) at each reading, under the last predicted orbits
+  real(dp) :: elong(MAXOBS) = 0.0_dp
   real(dp), parameter :: ELEV_KM = 0.030_dp
   real(dp), parameter :: TEMP_C = 10.0_dp, PRES_MBAR = 1010.0_dp
   real(dp), parameter :: MOON_EARTH_RATIO = 0.0123000371_dp
@@ -81,7 +98,7 @@ module tycho_fit_mod
   character(len=6), parameter :: PNAME(NP) = [character(len=6) :: &
       'e_E', 'i_E', 'Om_E', 'w_E', 'M0_E', 'n_E', 'a_E', &
       'e_M', 'i_M', 'Om_M', 'w_M', 'M0_M', 'n_M', 'a_M', &
-      'b_alt', 'b_d86', 'b_d95']
+      'b_alt', 'b_d86', 'b_d95', 'k_moon', 'k_refr', 'd_lat', 'b_al95', 'k_mo95', 'k_re95', 'd_la95']
 
   type :: reading
     character(len=12) :: id
@@ -155,7 +172,7 @@ contains
     real(dp), intent(in) :: H, d
     real(dp), intent(out) :: a, A_az
     real(dp) :: hr, dr, p, sa
-    hr = H*DEG2RAD; dr = d*DEG2RAD; p = LAT_DEG*DEG2RAD
+    hr = H*DEG2RAD; dr = d*DEG2RAD; p = lat_deg*DEG2RAD
     sa = sin(p)*sin(dr) + cos(p)*cos(dr)*cos(hr)
     a = asin(max(-1.0_dp, min(1.0_dp, sa)))*RAD2DEG
     A_az = modulo(atan2(-cos(dr)*sin(hr), sin(dr)*cos(p) - cos(dr)*cos(hr)*sin(p))*RAD2DEG, 360.0_dp)
@@ -165,13 +182,13 @@ contains
     real(dp), intent(in) :: a, A_az
     real(dp), intent(out) :: H, d
     real(dp) :: alr, azr, p, sd
-    alr = a*DEG2RAD; azr = A_az*DEG2RAD; p = LAT_DEG*DEG2RAD
+    alr = a*DEG2RAD; azr = A_az*DEG2RAD; p = lat_deg*DEG2RAD
     sd = sin(p)*sin(alr) + cos(p)*cos(alr)*cos(azr)
     d = asin(max(-1.0_dp, min(1.0_dp, sd)))*RAD2DEG
     H = atan2(-sin(azr)*cos(alr), cos(p)*sin(alr) - sin(p)*cos(alr)*cos(azr))*RAD2DEG
   end subroutine
 
-  pure function refraction_deg(alt) result(r)
+  function refraction_deg(alt) result(r)
     real(dp), intent(in) :: alt
     real(dp) :: r
     if (alt < -1.5_dp) then
@@ -179,7 +196,7 @@ contains
     end if
     r = 1.02_dp / tan((alt + 10.3_dp/(alt + 5.11_dp))*DEG2RAD)
     r = r * (PRES_MBAR/1010.0_dp) * (283.0_dp/(273.0_dp + TEMP_C))
-    r = max(r, 0.0_dp) / 60.0_dp
+    r = ref_scale*max(r, 0.0_dp) / 60.0_dp
   end function
 
   subroutine refract(H, d, H2, d2)
@@ -458,7 +475,7 @@ contains
     if (o%body == 1) then
       call topo(rsun, vearth, o, H, d, sd, SUN_RADIUS)
     else
-      call topo(rmoon, vearth, o, H, d, sd, MOON_RADIUS)
+      call topo(rmoon, vearth, o, H, d, sd, MOON_RADIUS*x(iy(18, o%year)))
     end if
     p = 0.0_dp
     select case (trim(o%qty))
@@ -469,7 +486,7 @@ contains
         Hl = H; dl = d
       end if
       call eq_to_hor(Hl, dl, a, A_az)
-      p = a + refraction_deg(a) + x(15)/60.0_dp
+      p = a + refraction_deg(a) + x(iy(15, o%year))/60.0_dp
     case ('DEC')
       call limb_point(H, d, sd, o%point, Hl, dl)
       call refract(Hl, dl, Hr, dr)
@@ -561,7 +578,9 @@ contains
     integer :: it
     real(dp), parameter :: SID_DEG_PER_S = 360.98564736629_dp/86400.0_dp
     o2 = obs(i)
+    call set_site(x, o2%year)
     rs0 = pos(:,1) - pos(:,2); rm0 = pos(:,3) - pos(:,2)
+    elong(i) = modulo(atan2(rm0(2), rm0(1)) - atan2(rs0(2), rs0(1)), TAU)*RAD2DEG
     if (o2%tkind == 'S') then
       t_used(i) = o2%jd
       p = predict_one(o2, x, rs0, rm0, vel(:,2), i); return
@@ -593,6 +612,23 @@ contains
     t_used(i) = o2%jd
     p = predict_one(o2, x, rs, rm, vel(:,2), i)
   end function
+
+  ! index of a per-year parameter for a reading of the given year
+  integer function iy(k, year)
+    integer, intent(in) :: k, year
+    iy = k
+    if (peryear .and. year /= 1586) iy = merge(21, k + 4, k == 15)
+  end function
+
+  subroutine set_site(x, year)
+    real(dp), intent(in) :: x(NP)
+    integer, intent(in) :: year
+    if (lat_deg /= LAT0_DEG + x(iy(20, year))/60.0_dp) then
+      lat_deg = LAT0_DEG + x(iy(20, year))/60.0_dp
+      call setup_observer()
+    end if
+    ref_scale = x(iy(19, year))
+  end subroutine
 
   function resid_arcmin(o, value, p) result(r)
     type(reading), intent(in) :: o
@@ -746,13 +782,15 @@ contains
     call cart_to_kepler(moon(1:3) - earth(1:3), moon(4:6) - earth(4:6), mu_em, a, e, i, O, w, M)
     x_true(8:14) = [e, i, O, w, M, sqrt(mu_em/a**3)*DAY_S, a]
     x_true(15:17) = 0.0_dp
+    x_true(18:19) = 1.0_dp; x_true(20) = 0.0_dp
+    x_true(21) = 0.0_dp; x_true(22:23) = 1.0_dp; x_true(24) = 0.0_dp
   end subroutine
 
   subroutine setup_observer()
     ! geocentric position of Uraniborg (WGS84), km
     real(dp) :: f, e2, phi, N
     f = 1.0_dp/WGS84_INVF; e2 = f*(2.0_dp - f)
-    phi = LAT_DEG*DEG2RAD
+    phi = lat_deg*DEG2RAD
     N = (WGS84_RADIUS/1000.0_dp)/sqrt(1.0_dp - e2*sin(phi)**2)
     coslat_rho = (N + ELEV_KM)*cos(phi)
     sinlat_rho = (N*(1.0_dp - e2) + ELEV_KM)*sin(phi)
@@ -808,6 +846,7 @@ contains
     case (2:5, 9:12);      s = 1.0d-2
     case (6, 13);          s = abs(x(k))*1.0d-5
     case (7, 14);          s = abs(x(k))*1.0d-2
+    case (18, 19, 22, 23); s = 1.0d-2
     case default;          s = 1.0_dp
     end select
   end function
@@ -821,6 +860,7 @@ contains
     case (2:5, 9:12);      h = 1.0d-6
     case (6, 13);          h = abs(x(k))*1.0d-7
     case (7, 14);          h = abs(x(k))*1.0d-5
+    case (18, 19, 22, 23); h = 1.0d-4
     case default;          h = 0.05_dp
     end select
   end function
@@ -838,7 +878,7 @@ contains
     J = 0.0_dp
     fix_choice = .true.          ! the same limbs for the perturbed orbits
     do k = 1, NP
-      if (.not. active(k)) cycle
+      if (.not. active(k) .or. .not. param_on(k)) cycle
       h = fd_step(x, k)
       xp = x; xp(k) = x(k) + h
       xm = x; xm(k) = x(k) - h
@@ -898,7 +938,7 @@ contains
     lam = 1.0d-3
     na = 0
     do k = 1, NP
-      if (active(k)) then
+      if (active(k) .and. param_on(k)) then
         na = na + 1; idx(na) = k
       end if
     end do
@@ -920,6 +960,12 @@ contains
           g(idx(k)) = g(idx(k)) + w*J(i, idx(k))*r(i)
           N(idx(k), idx(1:na)) = N(idx(k), idx(1:na)) + w*J(i, idx(k))*J(i, idx(1:na))
         end do
+      end do
+      ! a parameter no used reading depends on stays where it is
+      do k = 1, na
+        if (N(idx(k), idx(k)) <= 0.0_dp) then
+          N(idx(k), idx(k)) = 1.0_dp; g(idx(k)) = 0.0_dp
+        end if
       end do
       ! Marquardt loop
       do m = 1, 12
@@ -1110,10 +1156,10 @@ contains
       call jacobian(xr, values, J, r, active)
       P = 0.0_dp
       do k = 1, NP
-        if (active(k)) P(k,k) = sigma_prior(k)**2
+        if (active(k) .and. param_on(k)) P(k,k) = sigma_prior(k)**2
       end do
       do k = 1, NP
-        if (active(k)) P(k,k) = P(k,k)/pscale(xr, k)**2
+        if (active(k) .and. param_on(k)) P(k,k) = P(k,k)/pscale(xr, k)**2
       end do
       ! xs, P in scaled units relative to xr
       xs = 0.0_dp
@@ -1239,7 +1285,7 @@ program tycho_fit
       call add_noise(pred, synth, mc)
       x = start_guess(x_true)
       call fit_lm(x, synth, active, 0.0_dp, cov, use, rms, .false.)
-      write(*, '(A,I5,17ES20.11)') ' MC ', mc, x - x_true
+      write(*, '(A,I5,24ES20.11)') ' MC ', mc, x - x_true
     end do
 
   case ('fit')
@@ -1254,11 +1300,12 @@ program tycho_fit
     call report(" Fitted orbits from Tycho's readings (formal 1-sigma)", x, sig, x_true)
     call print_sigmas()
     call write_residuals(x, use)
-    write(*, '(A,17ES20.11)') ' FIT ', x
-    write(*, '(A,17ES20.11)') ' SIG ', sig
+    write(*, '(A,24ES20.11)') ' FIT ', x
+    write(*, '(A,24ES20.11)') ' SIG ', sig
     print '(/A)', ' Iterated extended Kalman filter (sequential updates, F = I, Q = 0), same readings and weights'
     sigma_prior = [0.05_dp, 0.05_dp, 0.05_dp, 0.5_dp, 0.5_dp, 1.0d-4, 1.0d7, &
-                   0.05_dp, 0.05_dp, 0.05_dp, 0.5_dp, 0.5_dp, 1.0d-2, 4.0d4, 5.0_dp, 5.0_dp, 5.0_dp]
+                   0.05_dp, 0.05_dp, 0.05_dp, 0.5_dp, 0.5_dp, 1.0d-2, 4.0d4, 5.0_dp, 5.0_dp, 5.0_dp, &
+                   0.1_dp, 0.3_dp, 5.0_dp, 5.0_dp, 0.1_dp, 0.3_dp, 5.0_dp]
     x = x0
     call fit_iekf(x, values, active, use, sigma_prior, 30, P)
     do k = 1, NP
@@ -1273,7 +1320,7 @@ program tycho_fit
     end do
     print '(A,F8.3,A,F12.2)', '   rms residual ', sqrt(rms/n), "'   chi2 ", r
     call report(' Iterated EKF result (1-sigma from the filter covariance)', x, sig, x_true)
-    write(*, '(A,17ES20.11)') ' EKF ', x
+    write(*, '(A,24ES20.11)') ' EKF ', x
 
   case ('profile')
     ! chi^2 as a function of the Earth-Sun distance a_E, all other
@@ -1348,6 +1395,8 @@ contains
     real(dp), parameter :: HALVES(7) = [5.0_dp, 10.0_dp, 20.0_dp, 40.0_dp, 80.0_dp, 160.0_dp, 400.0_dp]
     real(dp), parameter :: AE_RE(14) = [1150.0_dp, 2000.0_dp, 4000.0_dp, 7000.0_dp, 10000.0_dp, 13000.0_dp, &
         16000.0_dp, 19000.0_dp, 22000.0_dp, 25000.0_dp, 30000.0_dp, 40000.0_dp, 60000.0_dp, 100000.0_dp]
+    real(dp), parameter :: PROFW(11) = [0.5_dp, 0.6_dp, 0.7_dp, 0.8_dp, 0.9_dp, 1.0_dp, 1.1_dp, 1.25_dp, &
+                                        1.5_dp, 1.75_dp, 2.0_dp]
     real(dp), parameter :: PROF(11) = [0.80_dp, 0.85_dp, 0.90_dp, 0.95_dp, 0.98_dp, 1.0_dp, 1.02_dp, 1.05_dp, &
                                        1.10_dp, 1.15_dp, 1.20_dp]
 
@@ -1380,6 +1429,33 @@ contains
       xb = xt; xk = xt
       go to 500
     end if
+    ! argument 9 = fromfile: start the final fit from the vector in
+    ! blind_start.dat (a BLIND line of an earlier blind fit, all of Tycho's
+    ! own making), to refit subsets or with more parameters free
+    if (trim(arg) == 'fromfile') then
+      block
+        integer :: un, ios
+        character(len=4096) :: ln
+        character(len=16) :: tag
+        open(newunit=un, file='blind_start.dat', status='old', action='read')
+        read(un, '(A)') ln
+        close(un)
+        xb = 0.0_dp; xb(18:19) = 1.0_dp; xb(22:23) = 1.0_dp
+        read(ln, *, iostat=ios) tag, xb
+        if (ios /= 0) then
+          xb(21:24) = [xb(15), xb(18), xb(19), xb(20)]
+          read(ln, *, iostat=ios) tag, xb(1:20)
+          if (ios /= 0) then
+            xb(18:20) = [1.0_dp, 1.0_dp, 0.0_dp]
+            read(ln, *) tag, xb(1:17)
+          end if
+          xb(21:24) = [xb(15), xb(18), xb(19), xb(20)]
+        end if
+      end block
+      print '(A)', ' Final fit started from blind_start.dat (an earlier blind solution)'
+      xk = xb
+      go to 500
+    end if
 
     ! ── 1. the Sun ──
     allocate(dec(nall)); nd = 0
@@ -1392,7 +1468,7 @@ contains
     call sort_vals(dec(1:nd))
     ob = 0.5_dp*(dec(max(1, nint(0.98_dp*nd))) - dec(max(1, nint(0.02_dp*nd))))
     print '(A,I5,A,F8.3,A)', '   Sun meridian altitudes:', nd, ';  half their range (2-98 %):', ob, ' deg'
-    xb = 0.0_dp
+    xb = 0.0_dp; xb(18:19) = 1.0_dp; xb(22:23) = 1.0_dp
     xb(1:7) = [0.02_dp, ob*DEG2RAD, 0.0_dp, 0.0_dp, 0.0_dp, TAU/365.25_dp, 1150.0_dp*RE]
     xb(8:14) = [0.05_dp, ob*DEG2RAD, 0.0_dp, 0.0_dp, 0.0_dp, TAU/27.3217_dp, 60.0_dp*RE]
     call set_window(-1.0d30, 1.0d30, 1)
@@ -1516,6 +1592,28 @@ contains
     call transfer_epoch(xb, epoch0)
     call transfer_epoch(xk, epoch0)
     call set_window(-1.0d30, 1.0d30, 0)
+    ! argument 11: what else is fitted here (comma list):
+    !   moonr  the Moon's radius (otherwise 1737.4 km)
+    !   refr   the strength of refraction (scale of the Saemundsson formula)
+    !   lat    Uraniborg's latitude (otherwise 55 54' 27")
+    call get_command_argument(11, arg)
+    param_on(18) = index(arg, 'moonr') > 0
+    param_on(19) = index(arg, 'refr') > 0
+    param_on(20) = index(arg, 'lat') > 0
+    !   peryear  the 1595 readings get their own altitude offset and their
+    !            own values of whichever of the three above are fitted
+    peryear = index(arg, 'peryear') > 0
+    if (peryear) then
+      param_on(21) = .true.; param_on(22:24) = param_on(18:20)
+      print '(A)', '   per-year instrument parameters for 1595'
+    end if
+    if (any(param_on(18:20))) print '(A,3L2)', '   also fitted (Moon radius, refraction, latitude):', param_on(18:20)
+    ! argument 12: subset of the readings for the final fit
+    !   y1586 / y1595  one year;  moonstar  the Moon only where the stars
+    !   give the time (all Sun readings kept)
+    call get_command_argument(12, arg)
+    call quarter_table(xb)
+    if (len_trim(arg) > 0 .and. trim(arg) /= 'all') call apply_subset(trim(arg))
     print '(/A,I6,A)', '   5. All readings (', nobs, '), 1586 and 1595 together'
     block
       real(dp), allocatable :: v(:), pr(:)
@@ -1554,8 +1652,8 @@ contains
       call report(" BLIND FIT (nothing from JPL; JPL column for comparison only)", xb, sgv, xt)
       call print_sigmas()
       call write_blind_residuals(xb, u, v)
-      write(*, '(A,17ES20.11)') ' BLIND ', xb
-      write(*, '(A,17ES20.11)') ' BLINDSIG ', sgv
+      write(*, '(A,24ES20.11)') ' BLIND ', xb
+      write(*, '(A,24ES20.11)') ' BLINDSIG ', sgv
 
       ! χ² profile in a_E around the blind solution (weights and readings fixed)
       block
@@ -1569,6 +1667,8 @@ contains
         do kk = 1, 11
           sigma_g = sgf
           xp = xb; xp(7) = xb(7)*PROF(kk)
+          call get_command_argument(12, arg)
+          if (len_trim(arg) > 0 .and. trim(arg) /= 'all') xp(7) = xb(7)*PROFW(kk)
           call fit_lm(xp, v, actp, 4.0_dp, cv, u, rr, .false.)
           print '(F9.3,F16.1,F12.3,F10.3,F10.3,I7)', xp(7)/xb(7), xp(7), last_chi2, last_chi2 - chi0, rr, count(u)
         end do
@@ -1576,11 +1676,14 @@ contains
         freeze_sigma = .false.; freeze_use = .false.
 
         ! Kalman filter started from the 1586-only solution, same weights
+        call get_command_argument(9, arg)
+        if (trim(arg) == 'fromfile') return
         print '(/A)', ' Iterated EKF (F = I, Q = 0) on all readings, started from the 1586 solution'
         call fit_lm(xb, v, act, 4.0_dp, cv, u, rr, .false.)   ! the readings and weights to use
         xp = xk
         sigma_prior = [0.05_dp, 0.05_dp, 0.05_dp, 0.5_dp, 0.5_dp, 1.0d-4, 1.0d7, &
-                       0.05_dp, 0.05_dp, 0.05_dp, 0.5_dp, 0.5_dp, 1.0d-2, 4.0d4, 5.0_dp, 5.0_dp, 5.0_dp]
+                       0.05_dp, 0.05_dp, 0.05_dp, 0.5_dp, 0.5_dp, 1.0d-2, 4.0d4, 5.0_dp, 5.0_dp, 5.0_dp, &
+                   0.1_dp, 0.3_dp, 5.0_dp, 5.0_dp, 0.1_dp, 0.3_dp, 5.0_dp]
         call fit_iekf(xp, v, act, u, sigma_prior, 30, P)
         call predict_all(xp, pr)
         rr = 0.0_dp
@@ -1592,9 +1695,63 @@ contains
         end do
         print '(A,F12.2,A,F12.2)', '   chi2 ', rr, '   (batch least squares ', last_chi2, ')'
         call report(' Iterated EKF from the 1586 solution (filter 1-sigma)', xp, sgv, xt)
-        write(*, '(A,17ES20.11)') ' BLINDEKF ', xp
+        write(*, '(A,24ES20.11)') ' BLINDEKF ', xp
       end block
     end block
+  end subroutine
+
+  ! How many Moon readings fall near the quarters, and how each is timed
+  subroutine quarter_table(xr)
+    real(dp), intent(in) :: xr(NP)
+    real(dp) :: pr(nobs)
+    integer :: cnt(2, 3, 3), y, ph, tk, j
+    call predict_all(xr, pr)
+    cnt = 0
+    do j = 1, nobs
+      if (obs(j)%body /= 2) cycle
+      y = merge(1, 2, obs(j)%year == 1586)
+      if (elong(j) >= 45.0_dp .and. elong(j) <= 135.0_dp) then
+        ph = 1
+      else if (elong(j) >= 225.0_dp .and. elong(j) <= 315.0_dp) then
+        ph = 2
+      else
+        ph = 3
+      end if
+      tk = index('SAM', obs(j)%tkind)
+      if (tk == 0) tk = 1
+      cnt(y, ph, tk) = cnt(y, ph, tk) + 1
+    end do
+    print '(/A)', '   Moon readings by phase (elongation 45-135 deg: first quarter, 225-315: last) and timing'
+    print '(A)',  '     year  phase           star clock  local time  transit'
+    do y = 1, 2
+      print '(5X,I4,2X,A,3I12)', merge(1586, 1595, y == 1), 'first quarter', cnt(y, 1, :)
+      print '(5X,I4,2X,A,3I12)', merge(1586, 1595, y == 1), 'last quarter ', cnt(y, 2, :)
+      print '(5X,I4,2X,A,3I12)', merge(1586, 1595, y == 1), 'other        ', cnt(y, 3, :)
+    end do
+  end subroutine
+
+  subroutine apply_subset(name)
+    character(len=*), intent(in) :: name
+    logical :: keep(nobs)
+    integer :: j, m
+    do j = 1, nobs
+      select case (name)
+      case ('y1586'); keep(j) = obs(j)%year == 1586
+      case ('y1595'); keep(j) = obs(j)%year == 1595
+      case ('moonstar'); keep(j) = obs(j)%body == 1 .or. obs(j)%tkind == 'S'
+      case default
+        print *, 'unknown subset ', name; stop 1
+      end select
+    end do
+    m = 0
+    do j = 1, nobs
+      if (keep(j)) then
+        m = m + 1; obs(m) = obs(j)
+      end if
+    end do
+    nobs = m
+    call sort_order()
+    print '(A,A,A,I6,A)', '   subset ', name, ': ', nobs, ' readings'
   end subroutine
 
   subroutine run_fit(xr, act, clp, score, nused)
@@ -1731,7 +1888,7 @@ contains
       case (2:5, 9:12); f = RAD2DEG; unit = 'deg'
       case (6, 13);     f = RAD2DEG; unit = 'deg/day'
       case (7, 14);     f = 1.0_dp;  unit = 'km'
-      case (15:17);     f = 1.0_dp;  unit = 'arcmin'
+      case (15:17, 20, 21, 24); f = 1.0_dp;  unit = 'arcmin'
       case default;     f = 1.0_dp;  unit = ''
       end select
       print '(3X,A6,ES17.9,ES14.4,ES17.9,ES12.3,F9.2,2X,A)', PNAME(k2), xf(k2)*f, sg(k2)*f, xt(k2)*f, &
@@ -1742,6 +1899,17 @@ contains
     print '(A,F14.1,A,F10.1,A)', '        = ', xf(7)/6378.137_dp, ' Earth radii  +-', sg(7)/6378.137_dp, &
         '   (Tycho himself assumed about 1150)'
     print '(A,F14.3,A,F10.3,A,F14.3,A)', '   a_M  = ', xf(14), ' km  +-', sg(14), '   JPL ', xt(14), ' km'
+    print '(A,F12.4,A,F8.4,A)', '   a_M  = ', xf(14)/6378.137_dp, ' Earth radii  +-', sg(14)/6378.137_dp, &
+        '   (JPL 60.6347)'
+    print '(A,F10.2,A,F8.2,A,F7.4,A)', '   Moon radius = ', 1737.4_dp*xf(18), ' km  +-', 1737.4_dp*sg(18), &
+        '  (', 1737.4_dp*xf(18)/6378.137_dp, ' Earth radii; true 1737.4 km, 0.2724)'
+    print '(A,F8.4,A,F7.4,A,F8.3,A,F7.3,A)', '   refraction scale = ', xf(19), ' +-', sg(19), &
+        '    latitude offset = ', xf(20), ' +-', sg(20), "'"
+    if (peryear) then
+      print '(A,F10.2,A,F8.2,A,F8.4,A,F7.4,A,F8.3,A,F7.3,A)', '   1595: Moon radius = ', 1737.4_dp*xf(22), &
+          ' km  +-', 1737.4_dp*sg(22), '   refraction ', xf(23), ' +-', sg(23), '   latitude ', xf(24), ' +-', sg(24), "'"
+    end if
+    print '(A,F8.3,A,F8.3)', '   a_E/a_M = ', xf(7)/xf(14), ' +-', xf(7)/xf(14)*sg(7)/xf(7)
     print '(A,F14.4,A,F14.4,A)', '   sidereal year  = ', TAU/xf(6), ' d   (JPL osculating ', TAU/xt(6), ' d)'
     print '(A,F14.5,A,F14.5,A)', '   sidereal month = ', TAU/xf(13), ' d   (JPL osculating ', TAU/xt(13), ' d)'
     print '(A,ES14.6,A,ES14.6)', '   GM_sun+GM_earth  = ', (xf(6)/DAY_S)**2*xf(7)**3, '   JPL ', (xt(6)/DAY_S)**2*xt(7)**3
