@@ -120,11 +120,27 @@ module tycho_fit_mod
   ! "mdec" / "malt": the zero of the declinations / of the altitudes in each
   ! 30-day window (Sun and Moon together; the year's own offset is then off)
   logical :: use_mdec = .false., use_malt = .false., use_mdist = .false., use_mfar = .false.
+  logical :: auto_sel = .false.
+  ! mode "alien": the procedure of data/fit/ALIEN_PROCEDURE.md, its choices
+  ! fixed here (arguments 7 and 9-12 are not read)
+  logical :: alien = .false.
+  character(len=*), parameter :: ALIEN_MODEL = 'tycho+aberr,moonr,refr,lat,phase,nosunpar,tgroup,rdec,ralt,rdist,rfar'
+  character(len=*), parameter :: ALIEN_SUBSET = 'moonstar'
+  real(dp), parameter :: ALIEN_GAP = 5.0_dp
+  ! random effects ("rdec", "ralt", "rdist", "rfar"): the campaigns' values
+  ! of a correction scatter about its mean (the year's offset; for the far
+  ! limb one excess, x(90)) with a spread tau (arcmin) found from the data;
+  ! kinds 1 declination, 2 altitude, 3 distance, 4 far limb
+  logical :: reff(4) = .false.
+  real(dp) :: tau_re(4) = 1.0_dp
   ! reading being predicted, and whether a distance was read to the Moon's
   ! far limb (set in predict_pt)
   integer :: cur_i = 0
   ! length of the windows, days (environment TYCHO_WIN, default 30)
   real(dp) :: win_days = 30.0_dp
+  ! campaigns (environment TYCHO_GAP, days): a new window wherever the Moon
+  ! readings pause for more than camp_gap days; 0 = fixed windows
+  real(dp) :: camp_gap = 0.0_dp
   logical :: farlimb(MAXOBS) = .false.
   ! "nosunpar": the Sun seen from the Earth's centre (its 9" diurnal
   ! parallax, which also carries the Earth-Sun distance, left out), so
@@ -206,6 +222,8 @@ module tycho_fit_mod
     integer :: sess = 0
     character(len=1) :: clk = '-'
     real(dp) :: dclock = 0.0_dp
+    ! window (observing campaign) of the reading, for the window zeros
+    integer :: win = 1
   end type
 
   type(reading) :: obs(MAXOBS), obs_all(MAXOBS)
@@ -231,7 +249,9 @@ module tycho_fit_mod
   real(dp) :: coslat_rho, sinlat_rho
 
   ! Groups (year x body x quantity) for robust weighting
-  integer, parameter :: NQ = 8, NY = 8, NG = NY*2*NQ
+  ! groups: year x body x quantity (NGB), times three timing classes of the
+  ! Moon's readings when tgroup is set (star clock, local time, transit)
+  integer, parameter :: NQ = 8, NY = 8, NGB = NY*2*NQ, NG = 3*NGB
   integer, parameter :: YEARS(NY) = [1586, 1594, 1595, 1587, 1588, 1590, 1591, 1592]
   character(len=6), parameter :: QNAMES(NQ) = [character(len=6) :: &
       'DEC', 'ALT', 'ALTM', 'HA', 'AZ', 'DIST', 'RADIFF', 'DIAM']
@@ -272,6 +292,214 @@ contains
     ip_year = 0
     if (yidx(year) >= 4) ip_year = 43 + 9*(yidx(year) - 4) + j
   end function
+
+  ! window of every reading: fixed win_days windows, or campaigns of Moon
+  ! readings separated by pauses longer than camp_gap days (the Sun's
+  ! readings join the campaign nearest in time)
+  subroutine set_windows()
+    real(dp) :: t(MAXOBS), edge(NMON + 1), tk
+    integer :: i, n, ne, k
+    if (camp_gap <= 0.0_dp) then
+      do i = 1, nobs
+        obs(i)%win = mon_of(obs(i)%jd)
+      end do
+      return
+    end if
+    n = 0
+    do i = 1, nobs
+      if (obs(i)%body == 2) then
+        n = n + 1; t(n) = obs(i)%jd
+      end if
+    end do
+    do i = 2, n                                ! insertion sort
+      tk = t(i); k = i - 1
+      do while (k >= 1)
+        if (t(k) <= tk) exit
+        t(k + 1) = t(k); k = k - 1
+      end do
+      t(k + 1) = tk
+    end do
+    ne = 0
+    do i = 2, n
+      if (t(i) - t(i - 1) > camp_gap) then
+        ne = ne + 1
+        if (ne > NMON - 1) stop 'set_windows: too many campaigns; raise NMON or TYCHO_GAP'
+        edge(ne) = 0.5_dp*(t(i) + t(i - 1))
+      end if
+    end do
+    do i = 1, nobs
+      k = 1
+      do while (k <= ne)
+        if (obs(i)%jd < edge(k)) exit
+        k = k + 1
+      end do
+      obs(i)%win = k
+    end do
+    print '(A,F6.1,A,I4,A)', '   campaigns: pauses of more than ', camp_gap, ' days give ', ne + 1, ' windows'
+  end subroutine
+
+  ! Forward selection of the per-campaign corrections by the Bayesian
+  ! information criterion: a candidate with k parameters (campaigns that
+  ! have such readings) is adopted when it lowers chi2 by more than
+  ! k ln N, N the readings used; the best candidate first, until none is
+  ! worth its parameters.  Weights and the set of readings are frozen
+  ! during the tests, so the chi2 are comparable.
+  subroutine select_corrections(xb, v, act, cv, u, rms)
+    real(dp), intent(inout) :: xb(NP), cv(NP,NP), rms
+    real(dp), intent(in) :: v(nobs)
+    logical, intent(in) :: act(NP)
+    logical, intent(inout) :: u(nobs)
+    character(len=6), parameter :: CAND(4) = [character(len=6) :: 'mdec', 'mfar', 'malt', 'mdist']
+    logical :: taken(4)
+    real(dp) :: chi0, chi1, best, xt(NP), xbest(NP), sgf(NG), crit
+    integer :: c, k, kbest, nused, i, kpar
+    logical :: haswin(NMON)
+    taken = .false.
+    sgf = sigma_g
+    freeze_sigma = .true.; freeze_use = .true.
+    call fit_lm(xb, v, act, 4.0_dp, cv, u, rms, .false.)
+    chi0 = last_chi2; nused = count(u)
+    print '(/A,F12.2,A,I6,A)', '   choosing the corrections per campaign (chi2 ', chi0, ', ', nused, ' readings)'
+    do
+      best = 0.0_dp; kbest = 0
+      do c = 1, 4
+        if (taken(c)) cycle
+        call switch_corr(CAND(c), .true.)
+        ! parameters: campaigns with readings of that kind
+        haswin = .false.
+        do i = 1, nobs
+          if (.not. u(i)) cycle
+          select case (c)
+          case (1); if (trim(obs(i)%qty) == 'DEC') haswin(obs(i)%win) = .true.
+          case (2); if (trim(obs(i)%qty) == 'DIST' .and. obs(i)%body == 2 .and. farlimb(i)) haswin(obs(i)%win) = .true.
+          case (3); if (obs(i)%qty(1:3) == 'ALT') haswin(obs(i)%win) = .true.
+          case (4); if (trim(obs(i)%qty) == 'DIST' .and. obs(i)%body == 2) haswin(obs(i)%win) = .true.
+          end select
+        end do
+        kpar = count(haswin)
+        xt = xb
+        call fit_lm(xt, v, act, 4.0_dp, cv, u, rms, .false.)
+        chi1 = last_chi2
+        crit = (chi0 - chi1) - kpar*log(real(nused, dp))
+        print '(A,A6,A,I4,A,F12.2,A,F10.2,A,F14.1)', '      + ', CAND(c), ': ', kpar, ' parameters, chi2 ', chi1, &
+            '   gain - penalty ', crit, '   a_E ', xt(7)
+        if (crit > best) then
+          best = crit; kbest = c; xbest = xt
+        end if
+        call switch_corr(CAND(c), .false.)
+      end do
+      if (kbest == 0) exit
+      taken(kbest) = .true.
+      call switch_corr(CAND(kbest), .true.)
+      xb = xbest
+      call fit_lm(xb, v, act, 4.0_dp, cv, u, rms, .false.)
+      chi0 = last_chi2
+      print '(A,A6,A,F12.2)', '      adopted ', CAND(kbest), ';  chi2 ', chi0
+    end do
+    freeze_sigma = .false.; freeze_use = .false.
+    sigma_g = sgf
+    call fit_lm(xb, v, act, 4.0_dp, cv, u, rms, .false.)
+    print '(A,4(1X,A6,L2))', '   corrections adopted:', (CAND(c), taken(c), c = 1, 4)
+  end subroutine
+
+  ! command argument n, or the procedure's own choice in mode alien
+  subroutine get_arg(n, arg)
+    integer, intent(in) :: n
+    character(len=*), intent(out) :: arg
+    if (.not. alien) then
+      call get_command_argument(n, arg); return
+    end if
+    select case (n)
+    case (7); arg = 'blind'
+    case (9); arg = 'scratch'
+    case (10); arg = 'clock'
+    case (11)
+      arg = ALIEN_MODEL
+      ! (a variant of the model for comparison, environment TYCHO_ALIEN_MODEL)
+      block
+        integer :: st
+        character(len=256) :: mv
+        call get_environment_variable('TYCHO_ALIEN_MODEL', mv, status=st)
+        if (st == 0 .and. len_trim(mv) > 0) arg = mv
+      end block
+    case (12); arg = ALIEN_SUBSET
+    case default; call get_command_argument(n, arg)
+    end select
+  end subroutine
+
+  ! spread of the prior of parameter k (0: no prior)
+  real(dp) function prior_tau(k)
+    integer, intent(in) :: k
+    integer :: kind
+    prior_tau = 0.0_dp
+    if (k <= 95) return
+    kind = (k - 96)/NMON + 1
+    if (kind >= 1 .and. kind <= 4) then
+      if (reff(kind)) prior_tau = tau_re(kind)
+    end if
+  end function
+
+  ! the spreads of the random effects from the campaigns' values and their
+  ! uncertainties (one EM step): tau^2 = mean(x^2 + var) over campaigns
+  ! that have readings of the kind
+  subroutine update_tau(x, cv)
+    real(dp), intent(in) :: x(NP), cv(NP,NP)
+    integer :: kind, w, k, n
+    real(dp) :: s
+    do kind = 1, 4
+      if (.not. reff(kind)) cycle
+      s = 0.0_dp; n = 0
+      do w = 1, NMON
+        k = 95 + (kind - 1)*NMON + w
+        if (cv(k, k) <= 0.0_dp) cycle
+        s = s + x(k)**2 + cv(k, k); n = n + 1
+      end do
+      if (n > 0) tau_re(kind) = max(sqrt(s/n), 0.05_dp)
+    end do
+  end subroutine
+
+  ! switch one per-campaign correction on or off (and with it the year's
+  ! own offset of the same kind, the other way)
+  subroutine switch_corr(name, on)
+    character(len=*), intent(in) :: name
+    logical, intent(in) :: on
+    integer :: k1
+    select case (trim(name))
+    case ('mdec')
+      use_mdec = on; param_on(96:95 + NMON) = on
+      param_on([16, 17, 30]) = .not. on
+      do k1 = 4, NY
+        param_on(ip_year(YEARS(k1), 1)) = .not. on
+      end do
+    case ('malt')
+      use_malt = on; param_on(96 + NMON:95 + 2*NMON) = on
+      param_on(15) = .not. on
+      do k1 = 4, NY
+        if (peryear) param_on(ip_year(YEARS(k1), 0)) = .not. on
+      end do
+    case ('mdist')
+      use_mdist = on; param_on(96 + 2*NMON:95 + 3*NMON) = on
+    case ('mfar')
+      use_mfar = on; param_on(96 + 3*NMON:NP) = on
+    end select
+  end subroutine
+
+  ! "tgroup": the Moon's readings weighted in three timing classes, each
+  ! with its own scatter: timed by stars (S), by local time and the Sun (A),
+  ! meridian transits (M)
+  subroutine set_time_groups()
+    integer :: i, c
+    do i = 1, nall
+      if (obs_all(i)%body /= 2 .or. obs_all(i)%group > NGB) cycle
+      c = index('SAM', obs_all(i)%tkind) - 1
+      obs_all(i)%group = obs_all(i)%group + NGB*max(c, 0)
+    end do
+    do i = 1, nobs
+      if (obs(i)%body /= 2 .or. obs(i)%group > NGB) cycle
+      c = index('SAM', obs(i)%tkind) - 1
+      obs(i)%group = obs(i)%group + NGB*max(c, 0)
+    end do
+  end subroutine
 
   ! 30-day window of a moment (1..NMON)
   integer function mon_of(jd)
@@ -748,7 +976,7 @@ contains
       end if
       call eq_to_hor(Hl, dl, a, A_az)
       p = a + refraction_deg(a) + x(iy(15, o%year))/60.0_dp
-      if (use_malt) p = p + x(95 + NMON + mon_of(o%jd))/60.0_dp
+      if (use_malt) p = p + x(95 + NMON + o%win)/60.0_dp
       if (use_ew) p = p + x(ip_ew(o%year, 0))/60.0_dp*sin(A_az*DEG2RAD)
     case ('DEC')
       ! on the armillae the upper and lower limbs of a declination are the
@@ -760,7 +988,7 @@ contains
       call refract(Hl, dl, Hr, dr)
       call armil(Hr, dr, x, o%year, Hc, dr)
       p = dr + x(ip_dec(o%year))/60.0_dp
-      if (use_mdec) p = p + x(95 + mon_of(o%jd))/60.0_dp
+      if (use_mdec) p = p + x(95 + o%win)/60.0_dp
     case ('HA')
       call limb_point(H, d, msd(o%point), o%point, Hl, dl)
       call refract(Hl, dl, Hr, dr)
@@ -791,7 +1019,7 @@ contains
         call refract(H, d, Hc, dc)
         call refract(Hs, ds, Ho, dov)
         p = sep(Hc, dc, Ho, dov)
-        if (use_mdist .and. o%body == 2) p = p + x(95 + 2*NMON + mon_of(o%jd))/60.0_dp
+        if (use_mdist .and. o%body == 2) p = p + x(95 + 2*NMON + o%win)/60.0_dp
         select case (o%point)
         case ('N'); p = p - lit_sd('N', H, d, sd, Hsun, dsun, Hs, ds)
         case ('F'); p = p + lit_sd('F', H, d, sd, Hsun, dsun, Hs, ds)
@@ -804,7 +1032,7 @@ contains
             p = p + msd(o%point)
             if (use_dfar) p = p + x(90)/60.0_dp
             if (cur_i > 0) farlimb(cur_i) = .true.
-            if (use_mfar .and. o%body == 2) p = p + x(95 + 3*NMON + mon_of(o%jd))/60.0_dp
+            if (use_mfar .and. o%body == 2) p = p + x(95 + 3*NMON + o%win)/60.0_dp
           end if
         end select
         if (o%refpoint /= 'C' .and. sds > 0.0_dp) then
@@ -1036,6 +1264,7 @@ contains
     end do
     close(u)
     nall = nobs
+    call set_windows()
     obs_all(1:nall) = obs(1:nobs)
     call sort_order()
     k = 0
@@ -1247,15 +1476,15 @@ contains
         do i = 1, nobs
           if (obs(i)%body == 3) cycle
           if (k <= 95 + NMON) then
-            if (trim(obs(i)%qty) == 'DEC' .and. mon_of(obs(i)%jd) == k - 95) J(i, k) = 1.0_dp
+            if (trim(obs(i)%qty) == 'DEC' .and. obs(i)%win == k - 95) J(i, k) = 1.0_dp
           else if (k <= 95 + 2*NMON) then
-            if (obs(i)%qty(1:3) == 'ALT' .and. mon_of(obs(i)%jd) == k - 95 - NMON) J(i, k) = 1.0_dp
+            if (obs(i)%qty(1:3) == 'ALT' .and. obs(i)%win == k - 95 - NMON) J(i, k) = 1.0_dp
           else if (k <= 95 + 3*NMON) then
             if (trim(obs(i)%qty) == 'DIST' .and. obs(i)%body == 2 .and. &
-                mon_of(obs(i)%jd) == k - 95 - 2*NMON) J(i, k) = 1.0_dp
+                obs(i)%win == k - 95 - 2*NMON) J(i, k) = 1.0_dp
           else
             if (trim(obs(i)%qty) == 'DIST' .and. obs(i)%body == 2 .and. farlimb(i) .and. &
-                mon_of(obs(i)%jd) == k - 95 - 3*NMON) J(i, k) = 1.0_dp
+                obs(i)%win == k - 95 - 3*NMON) J(i, k) = 1.0_dp
           end if
         end do
         cycle
@@ -1357,6 +1586,15 @@ contains
           N(idx(k), idx(1:na)) = N(idx(k), idx(1:na)) + w*J(i, idx(k))*J(i, idx(1:na))
         end do
       end do
+      ! random effects: a campaign's value is drawn about zero with spread tau
+      do k = 1, na
+        uu = prior_tau(idx(k))
+        if (uu > 0.0_dp .and. N(idx(k), idx(k)) > 0.0_dp) then
+          N(idx(k), idx(k)) = N(idx(k), idx(k)) + 1.0_dp/uu**2
+          g(idx(k)) = g(idx(k)) - x(idx(k))/uu**2
+          chi2 = chi2 + (x(idx(k))/uu)**2
+        end if
+      end do
       ! a parameter no used reading depends on stays where it is
       do k = 1, na
         if (N(idx(k), idx(k)) <= 0.0_dp) then
@@ -1389,6 +1627,10 @@ contains
           if (.not. use(i)) cycle
           rn(i) = dresid(obs(i), values(i), pn(i))
           chi2n = chi2n + wr(i)*rn(i)**2/sigma_g(obs(i)%group)**2
+        end do
+        do k = 1, na
+          uu = prior_tau(idx(k))
+          if (uu > 0.0_dp .and. xn(idx(k)) /= 0.0_dp) chi2n = chi2n + (xn(idx(k))/uu)**2
         end do
         if (ok .and. chi2n < chi2) then
           lam = max(lam/5.0_dp, 1.0d-9); exit
@@ -1610,14 +1852,18 @@ program tycho_fit
   call get_command_argument(1, obs_file)
   call get_command_argument(2, state_file)
   call get_command_argument(3, mode)
+  if (trim(mode) == 'alien') then
+    alien = .true.; mode = 'blind'; camp_gap = ALIEN_GAP
+    print '(A)', ' THE PROCEDURE (data/fit/ALIEN_PROCEDURE.md): model ' // ALIEN_MODEL // ', subset ' // ALIEN_SUBSET
+  end if
   if (len_trim(mode) == 0) mode = 'fit'
   clip = 0.0_dp; n_mc = 10; seed0 = 1
   call get_command_argument(4, arg); if (len_trim(arg) > 0) read(arg, *) clip
   call get_command_argument(5, arg); if (len_trim(arg) > 0) read(arg, *) n_mc
   call get_command_argument(6, arg); if (len_trim(arg) > 0) read(arg, *) seed0
-  call get_command_argument(7, arg); if (trim(arg) == 'noplanets') use_planets = .false.
+  call get_arg(7, arg); if (trim(arg) == 'noplanets') use_planets = .false.
 
-  call get_command_argument(11, arg)
+  call get_arg(11, arg)
   if (index(arg, 'nosunpar') > 0) no_sun_par = .true.
   if (index(arg, 'sunfix') > 0) sun_sd_fixed = .true.
   if (index(arg, 'tycho') > 0) then
@@ -1636,6 +1882,8 @@ program tycho_fit
     call get_environment_variable('TYCHO_WIN', wv, status=st)
     if (st == 0 .and. len_trim(wv) > 0) read(wv, *) win_days
     if (win_days /= 30.0_dp) print '(A,F6.1,A)', '   windows of ', win_days, ' days'
+    call get_environment_variable('TYCHO_GAP', wv, status=st)
+    if (st == 0 .and. len_trim(wv) > 0) read(wv, *) camp_gap
   end block
   call setup_observer()
   call read_obs(trim(obs_file))
@@ -1645,14 +1893,14 @@ program tycho_fit
   k = minloc([(abs(obs(i)%jd - epoch_jd), i = 1, nobs)], 1)
   earth_pole = obs(k)%M(3,:)
   call get_command_argument(8, arg); if (trim(arg) == 'noj2') use_j2 = .false.
-  call get_command_argument(7, arg)
+  call get_arg(7, arg)
   if (trim(mode) == 'blind' .or. trim(arg) == 'blind') then
     ! nothing from JPL in the model: Sun, Earth and Moon only, the Sun
     ! starting at rest at the origin
     nb_used = 3; use_planets = .false.; sun_state = 0.0_dp
     ! DIAGNOSTIC (argument 11 contains 'planets'): the planets as perturbers,
     ! started from DE441
-    call get_command_argument(11, arg)
+    call get_arg(11, arg)
     if (index(arg, 'planets') > 0) then
       nb_used = 8; use_planets = .true.
       call read_state(trim(state_file), x_true)
@@ -1684,7 +1932,7 @@ program tycho_fit
   select case (trim(mode))
 
   case ('check')
-    call get_command_argument(10, arg)
+    call get_arg(10, arg)
     if (trim(arg) == 'clock') then
       do k = 1, 3
         call update_clocks(x_true, n, r)
@@ -1866,7 +2114,7 @@ contains
     ! Diagnostic only (argument 9 = fromjpl): skip the build-up and start the
     ! final fit from JPL's orbits, to see whether the blind fit found the
     ! lowest chi2 of these readings
-    call get_command_argument(9, arg)
+    call get_arg(9, arg)
     if (trim(arg) == 'fromjpl') then
       print '(A)', ' DIAGNOSTIC: final fit started from JPL''s orbits (optimizer check, not a result)'
       xb = xt; xk = xt
@@ -2053,7 +2301,7 @@ contains
     !   moonr  the Moon's radius (otherwise 1737.4 km)
     !   refr   the strength of refraction (scale of the Saemundsson formula)
     !   lat    Uraniborg's latitude (otherwise 55 54' 27")
-    call get_command_argument(11, arg)
+    call get_arg(11, arg)
     param_on(18) = index(arg, 'moonr') > 0
     param_on(19) = index(arg, 'refr') > 0
     param_on(20) = index(arg, 'lat') > 0
@@ -2077,6 +2325,21 @@ contains
       use_dfar = .true.; param_on(90) = .true.
     end if
     if (index(arg, 'decns') > 0) dec_ns = .true.
+    if (index(arg, 'tgroup') > 0) call set_time_groups()
+    auto_sel = index(arg, 'auto') > 0
+    if (index(arg, 'rdec') > 0) then
+      reff(1) = .true.; use_mdec = .true.; param_on(96:95 + NMON) = .true.
+    end if
+    if (index(arg, 'ralt') > 0) then
+      reff(2) = .true.; use_malt = .true.; param_on(96 + NMON:95 + 2*NMON) = .true.
+    end if
+    if (index(arg, 'rdist') > 0) then
+      reff(3) = .true.; use_mdist = .true.; param_on(96 + 2*NMON:95 + 3*NMON) = .true.
+    end if
+    if (index(arg, 'rfar') > 0) then
+      reff(4) = .true.; use_mfar = .true.; param_on(96 + 3*NMON:NP) = .true.
+      use_dfar = .true.; param_on(90) = .true.
+    end if
     if (index(arg, 'mdec') > 0) then
       use_mdec = .true.; param_on(96:95 + NMON) = .true.
       param_on([16, 17, 30]) = .false.
@@ -2135,7 +2398,7 @@ contains
     ! argument 12: subset of the readings for the final fit
     !   y1586 / y1595  one year;  moonstar  the Moon only where the stars
     !   give the time (all Sun readings kept)
-    call get_command_argument(12, arg)
+    call get_arg(12, arg)
     call quarter_table(xb)
     if (len_trim(arg) > 0 .and. trim(arg) /= 'all') call apply_subset(trim(arg))
     print '(/A,I6,A)', '   5. All readings (', nobs, '), all years together'
@@ -2158,7 +2421,7 @@ contains
           ' km   rms ', rms, "'   chi2 ", last_chi2
       ! the clocks of the daytime sessions from the model's own Sun
       ! (argument 10 = noclock leaves Tycho's clock times as written)
-      call get_command_argument(10, arg)
+      call get_arg(10, arg)
       if (trim(arg) /= 'noclock') then
         do kk = 1, 4
           call update_clocks(xb, nw, score)
@@ -2166,6 +2429,18 @@ contains
           print '(A,I2,A,I5,A,F8.2,A,F14.1,A,F8.3,A,F12.2)', '      session clocks, pass', kk, ':', nw, &
               ' readings corrected, median |correction| ', score, ' min;  a_E ', xb(7), ' km  rms ', rms, &
               "'  chi2 ", last_chi2
+        end do
+      end if
+      ! "auto": the corrections of the instruments per campaign, each taken
+      ! only if the readings ask for it (Bayesian information criterion,
+      ! with the weights and readings of the fit so far held fixed)
+      if (auto_sel) call select_corrections(xb, v, act, cv, u, rms)
+      if (any(reff)) then
+        do kk = 1, 6
+          call update_tau(xb, cv)
+          call fit_lm(xb, v, act, 4.0_dp, cv, u, rms, .false.)
+          print '(A,I2,A,4F7.3,A,F14.1)', '      random effects, pass', kk, ':  tau (dec, alt, dist, far) ', tau_re, &
+              "'   a_E ", xb(7)
         end do
       end if
       do kk = 1, NP
@@ -2186,6 +2461,54 @@ contains
         end do
         close(un)
       end block
+
+      ! the procedure's uncertainty: leave out one year at a time and refit
+      ! (jackknife over the years); then stop
+      if (alien) then
+        block
+          type(reading), allocatable :: keep_obs(:)
+          real(dp), allocatable :: vj(:)
+          logical, allocatable :: uj(:)
+          real(dp) :: aj(NY), xj(NP), rj, mean, var
+          real(dp), allocatable :: cvj(:,:)
+          integer :: nkeep, y, nj, j2, m2
+          allocate(cvj(NP, NP))
+          nkeep = nobs; allocate(keep_obs(nkeep)); keep_obs = obs(1:nkeep)
+          nj = 0
+          print '(/A)', '   jackknife: each year left out in turn'
+          do y = 1, NY
+            if (count(keep_obs%year == YEARS(y)) == 0) cycle
+            m2 = 0
+            do j2 = 1, nkeep
+              if (keep_obs(j2)%year /= YEARS(y)) then
+                m2 = m2 + 1; obs(m2) = keep_obs(j2)
+              end if
+            end do
+            nobs = m2
+            call sort_order()
+            allocate(vj(nobs), uj(nobs)); vj = obs(1:nobs)%value
+            xj = xb
+            call fit_lm(xj, vj, act, 4.0_dp, cvj, uj, rj, .false.)
+            if (any(reff)) then
+              do kk = 1, 3
+                call update_tau(xj, cvj)
+                call fit_lm(xj, vj, act, 4.0_dp, cvj, uj, rj, .false.)
+              end do
+            end if
+            nj = nj + 1; aj(nj) = xj(7)
+            print '(A,I5,A,F14.1,A)', '      without ', YEARS(y), ':  a_E ', xj(7), ' km'
+            deallocate(vj, uj)
+          end do
+          obs(1:nkeep) = keep_obs; nobs = nkeep
+          call sort_order()
+          mean = sum(aj(1:nj))/nj
+          var = (nj - 1.0_dp)/nj*sum((aj(1:nj) - mean)**2)
+          print '(/A,F14.1,A,F12.1,A,F12.1,A)', ' RESULT  Earth-Sun distance ', xb(7), ' km  +- ', sqrt(var), &
+              ' (jackknife over years; formal ', sgv(7), ')'
+          print '(A,F14.4,A,F10.4,A)', '         in Earth radii ', xb(7)/RE_KM, '   Earth-Moon ', xb(14)/RE_KM, ' Earth radii'
+        end block
+        return
+      end if
 
       ! DIAGNOSTIC (environment TYCHO_PULL): each reading's share of the
       ! pull on a_E -- w J r / sum(w J^2), with J the derivative in a_E
@@ -2272,7 +2595,7 @@ contains
         do kk = 1, 11
           sigma_g = sgf
           xp = xb; xp(7) = xb(7)*PROF(kk)
-          call get_command_argument(12, arg)
+          call get_arg(12, arg)
           if (len_trim(arg) > 0 .and. trim(arg) /= 'all') xp(7) = xb(7)*PROFW(kk)
           call fit_lm(xp, v, actp, 4.0_dp, cv, u, rr, .false.)
           print '(F9.3,F16.1,F12.3,F10.3,F10.3,I7)', xp(7)/xb(7), xp(7), last_chi2, last_chi2 - chi0, rr, count(u)
@@ -2281,7 +2604,7 @@ contains
         freeze_sigma = .false.; freeze_use = .false.
 
         ! Kalman filter started from the 1586-only solution, same weights
-        call get_command_argument(9, arg)
+        call get_arg(9, arg)
         if (trim(arg) == 'fromfile') return
         print '(/A)', ' Iterated EKF (F = I, Q = 0) on all readings, started from the 1586 solution'
         call fit_lm(xb, v, act, 4.0_dp, cv, u, rr, .false.)   ! the readings and weights to use
@@ -2480,9 +2803,10 @@ contains
   function group_name(g) result(s)
     integer, intent(in) :: g
     character(len=18) :: s
-    integer :: y, b, q
-    y = (g - 1)/(2*NQ); b = mod((g - 1)/NQ, 2); q = mod(g - 1, NQ) + 1
-    write(s, '(I4,1X,A4,1X,A6)') YEARS(y + 1), merge('Sun ', 'Moon', b == 0), QNAMES(q)
+    integer :: y, b, q, c
+    c = (g - 1)/NGB
+    y = mod(g - 1, NGB)/(2*NQ); b = mod((g - 1)/NQ, 2); q = mod(g - 1, NQ) + 1
+    write(s, '(I4,1X,A4,1X,A6,1X,A1)') YEARS(y + 1), merge('Sun ', 'Moon', b == 0), QNAMES(q), 'SAM'(c+1:c+1)
   end function
 
   subroutine tycho_sigmas()
