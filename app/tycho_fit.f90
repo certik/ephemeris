@@ -91,6 +91,11 @@ module tycho_fit_mod
   ! "mra": the Moon's right ascensions on the armillae (hour angles and
   ! right-ascension differences) read west of the truth by x(IDL0+3), arcmin
   logical :: use_mra = .false.
+  ! whether the limb of each declination reading lies on the dark side of
+  ! the Moon (set in the predictions, from the model's own Sun), and whether
+  ! the last lit_sd was on the dark side; "nodarkdec" (subset) leaves out
+  ! the declinations of limbs on the dark side
+  logical :: decdark(MAXOBS) = .false., lsd_dark = .false.
   ! x(26:29): 1594's altitude offset, Moon radius, refraction, latitude
   ! (peryear); x(30): 1594's declination offset
   ! x(43:87): one block of 9 for each further year (1587, 1588, 1590, 1591,
@@ -287,6 +292,7 @@ module tycho_fit_mod
 
   ! OpenMP: what a prediction writes as scratch is private to each thread
   !$omp threadprivate(lat_deg, ref_scale, h_scale, ld_lit, ld_dark, coslat_rho, sinlat_rho, cur_i, alt_read, ha_read, &
+  !$omp&   decdark, lsd_dark, &
   !$omp&   star_dp, farlimb, elong, t_used, c_pos, c_vel, c_key)
 
 contains
@@ -472,7 +478,14 @@ contains
         call get_environment_variable('TYCHO_ALIEN_MODEL', mv, status=st)
         if (st == 0 .and. len_trim(mv) > 0) arg = mv
       end block
-    case (12); arg = ALIEN_SUBSET
+    case (12)
+      arg = ALIEN_SUBSET
+      block
+        integer :: st
+        character(len=256) :: mv
+        call get_environment_variable('TYCHO_ALIEN_SUBSET', mv, status=st)
+        if (st == 0 .and. len_trim(mv) > 0) arg = mv
+      end block
     case default; call get_command_argument(n, arg)
     end select
   end subroutine
@@ -732,6 +745,7 @@ contains
     real(dp), intent(in) :: H, d, sd, Hs, ds, Hx, dx
     real(dp) :: sdl, se, sn, ue, un, a, A_az, H2, d2, ct, cp, ci, n
     sdl = sd
+    lsd_dark = .false.
     if (.not. use_phase) return
     select case (pt)
     case ('U', 'L')
@@ -760,6 +774,7 @@ contains
       if (use_ld .and. .not. use_ldns) sdl = sd + ld_lit/60.0_dp
       return
     end if
+    lsd_dark = .true.
     cp = abs(-ue*sn + un*se)                 ! cos of the angle to the line of the horns
     ci = max(-cos(sep(H, d, Hs, ds)*DEG2RAD), 0.0_dp)   ! cos(phase angle) on a gibbous Moon
     sdl = sd*sqrt(cp*cp + ci*ci*ct*ct)
@@ -1049,6 +1064,7 @@ contains
       if (dec_ns .and. ptd == 'U') ptd = 'A'
       if (dec_ns .and. ptd == 'L') ptd = 'B'
       call limb_point(H, d, msd(ptd), ptd, Hl, dl)
+      if (cur_i > 0 .and. o%body == 2) decdark(cur_i) = lsd_dark .and. index('AB', ptd) > 0
       call refract(Hl, dl, Hr, dr)
       call armil(Hr, dr, x, o%year, Hc, dr)
       p = dr + x(ip_dec(o%year))/60.0_dp
@@ -2588,6 +2604,13 @@ contains
     !   give the time (all Sun readings kept)
     call get_arg(12, arg)
     call quarter_table(xb)
+    if (index(arg, 'nodarkdec') > 0) then
+      ! which limbs are on the dark side, from the model's own Sun
+      block
+        real(dp), allocatable :: ptmp(:)
+        allocate(ptmp(nobs)); call predict_all(xb, ptmp)
+      end block
+    end if
     if (len_trim(arg) > 0 .and. trim(arg) /= 'all') call apply_subset(trim(arg))
     if (use_rstar) then
       ! only stars read against the Moon on at least star_min_nights
@@ -2943,6 +2966,8 @@ contains
       ! nocres: no Moon readings at a crescent (within 70 deg of the Sun)
       if (index(name, 'nocres') > 0 .and. obs(j)%body == 2) keep(j) = keep(j) .and. &
           elong(j) > 70.0_dp .and. elong(j) < 290.0_dp
+      if (index(name, 'nodarkdec') > 0 .and. obs(j)%body == 2 .and. trim(obs(j)%qty) == 'DEC') &
+          keep(j) = keep(j) .and. .not. decdark(j)
       if (index(name, 'old1586') > 0) keep(j) = keep(j) .and. &
           .not. (obs(j)%id(1:5) == 'm86c:' .or. obs(j)%id(1:5) == 'm86d:')
     end do
