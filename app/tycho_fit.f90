@@ -72,13 +72,25 @@ module tycho_fit_mod
   ! reference stars of the distances: an offset (east, north; arcmin) of
   ! each from the catalogue, x(596:...), "rstar" (random effects)
   integer, parameter :: NSTAR = 80, IST0 = 95 + 4*NMON
-  integer, parameter :: NP_ORB = 14, NP_NUIS = 81 + 4*NMON + 2*NSTAR, NP = NP_ORB + NP_NUIS
+  ! "limbld": a limb read on the lit side lies outward by x(IDL0+1)
+  ! (irradiation), one on the dark side falls short of the lit figure's
+  ! extreme by x(IDL0+2) (fading horns and terminator), arcmin
+  integer, parameter :: IDL0 = IST0 + 2*NSTAR
+  integer, parameter :: NP_ORB = 14, NP_NUIS = 81 + 4*NMON + 2*NSTAR + 3, NP = NP_ORB + NP_NUIS
   integer, parameter :: MAXOBS = 20000
   real(dp), parameter :: LAT0_DEG = 55.0_dp + 54.0_dp/60 + 27.0_dp/3600
   ! latitude used by the predictions: LAT0_DEG + x(20) (arcmin); refraction
   ! scaled by x(19); the Moon's radius MOON_RADIUS*x(18).  Set from x at the
   ! start of predict_all.  x(18:20) are fitted only where param_on allows.
   real(dp) :: lat_deg = LAT0_DEG, ref_scale = 1.0_dp
+  real(dp) :: ld_lit = 0.0_dp, ld_dark = 0.0_dp
+  logical :: use_ld = .false.
+  ! "limbdarkns": the dark-side shortfall separately for the north limb
+  ! (x(IDL0+1)) and the south limb (x(IDL0+2)) of a declination
+  logical :: use_ldns = .false.
+  ! "mra": the Moon's right ascensions on the armillae (hour angles and
+  ! right-ascension differences) read west of the truth by x(IDL0+3), arcmin
+  logical :: use_mra = .false.
   ! x(26:29): 1594's altitude offset, Moon radius, refraction, latitude
   ! (peryear); x(30): 1594's declination offset
   ! x(43:87): one block of 9 for each further year (1587, 1588, 1590, 1591,
@@ -274,7 +286,7 @@ module tycho_fit_mod
   real(dp) :: last_chi2 = 0.0_dp
 
   ! OpenMP: what a prediction writes as scratch is private to each thread
-  !$omp threadprivate(lat_deg, ref_scale, h_scale, coslat_rho, sinlat_rho, cur_i, alt_read, ha_read, &
+  !$omp threadprivate(lat_deg, ref_scale, h_scale, ld_lit, ld_dark, coslat_rho, sinlat_rho, cur_i, alt_read, ha_read, &
   !$omp&   star_dp, farlimb, elong, t_used, c_pos, c_vel, c_key)
 
 contains
@@ -473,6 +485,7 @@ contains
     if (k <= 95) return
     kind = (k - 96)/NMON + 1
     if (k > IST0) kind = 5
+    if (k > IDL0) return                      ! the lit/dark offsets: no prior
     if (kind >= 1 .and. kind <= 5) then
       if (reff(kind)) prior_tau = tau_re(kind)
     end if
@@ -560,6 +573,7 @@ contains
       write(PNAME(IST0 + 2*k - 1), '(A,I2.2)') 'stE', k
       write(PNAME(IST0 + 2*k), '(A,I2.2)') 'stN', k
     end do
+    PNAME(IDL0 + 1) = 'd_lit'; PNAME(IDL0 + 2) = 'd_dark'; PNAME(IDL0 + 3) = 'm_ra'
   end subroutine
 
   ! declination offset of a year
@@ -742,10 +756,16 @@ contains
     end select
     call sky_dir(H, d, Hs, ds, se, sn)
     ct = ue*se + un*sn
-    if (ct >= 0.0_dp) return                 ! the lit side: the limb itself
+    if (ct >= 0.0_dp) then                   ! the lit side: the limb itself
+      if (use_ld .and. .not. use_ldns) sdl = sd + ld_lit/60.0_dp
+      return
+    end if
     cp = abs(-ue*sn + un*se)                 ! cos of the angle to the line of the horns
     ci = max(-cos(sep(H, d, Hs, ds)*DEG2RAD), 0.0_dp)   ! cos(phase angle) on a gibbous Moon
     sdl = sd*sqrt(cp*cp + ci*ci*ct*ct)
+    if (use_ld) sdl = max(sdl - ld_dark/60.0_dp, 0.0_dp)
+    if (use_ldns .and. pt == 'A') sdl = max(sdl - ld_lit/60.0_dp, 0.0_dp)
+    if (use_ldns .and. pt == 'B') sdl = max(sdl - ld_dark/60.0_dp, 0.0_dp)
   end function
 
   function sep(H1, d1, H2, d2) result(s)
@@ -1037,6 +1057,7 @@ contains
       call limb_point(H, d, msd(o%point), o%point, Hl, dl)
       call refract(Hl, dl, Hr, dr)
       call armil(Hr, dr, x, o%year, p, dc)
+      if (use_mra .and. o%body == 2) p = p + x(IDL0 + 3)/60.0_dp/max(cos(dc*DEG2RAD), 1.0d-6)
     case ('AZ')
       call limb_point(H, d, msd(o%point), o%point, Hl, dl)
       call refract(Hl, dl, Hr, dr)
@@ -1063,6 +1084,7 @@ contains
         call refract(Hl, dl, Hc, dc)
         call armil(Hc, dc, x, o%year, Ho, dov)
         p = wrap180(Ho - Hr)
+        if (use_mra .and. o%body == 2) p = p - x(IDL0 + 3)/60.0_dp/max(cos(dr*DEG2RAD), 1.0d-6)
         if (cur_i > 0 .and. o%star > 0) star_dp(:, cur_i) = [-1.0_dp/max(cos(ds*DEG2RAD), 1.0d-6), 0.0_dp]
       else
         call refract(H, d, Hc, dc)
@@ -1266,6 +1288,7 @@ contains
     end if
     ref_scale = x(iy(19, year))
     h_scale = x(25)
+    ld_lit = x(IDL0 + 1); ld_dark = x(IDL0 + 2)
   end subroutine
 
   function resid_arcmin(o, value, p) result(r)
@@ -1517,7 +1540,7 @@ contains
     real(dp), intent(out) :: J(nobs, NP), r0(nobs)
     logical, intent(in) :: active(NP)
     real(dp) :: xp(NP), xm(NP), pp(nobs), pm(nobs), p0(nobs), h
-    integer :: k, i
+    integer :: k, i, kk
     call predict_all(x, p0)
     do i = 1, nobs
       r0(i) = dresid(obs(i), values(i), p0(i))
@@ -1526,7 +1549,7 @@ contains
     fix_choice = .true.          ! the same limbs for the perturbed orbits
     ! the analytic columns (window zeros, star offsets), from the prediction
     ! just made
-    do k = 96, NP
+    do k = 96, IDL0
       if (.not. active(k) .or. .not. param_on(k)) cycle
       if (k > IST0) then
         ! a reference star's offset
@@ -1555,9 +1578,10 @@ contains
       end if
     end do
     ! the numerical columns, in parallel (each column on its own)
-    !$omp parallel do schedule(dynamic) default(shared) private(k, i, h, xp, xm, pp, pm) &
-    !$omp& copyin(lat_deg, ref_scale, h_scale, coslat_rho, sinlat_rho)
-    do k = 1, 95
+    !$omp parallel do schedule(dynamic) default(shared) private(kk, k, i, h, xp, xm, pp, pm) &
+    !$omp& copyin(lat_deg, ref_scale, h_scale, ld_lit, ld_dark, coslat_rho, sinlat_rho)
+    do kk = 1, 98
+      k = merge(kk, IDL0 + kk - 95, kk <= 95)
       if (.not. active(k) .or. .not. param_on(k)) cycle
       h = fd_step(x, k)
       xp = x; xp(k) = x(k) + h
@@ -2123,8 +2147,8 @@ program tycho_fit
     call report(" Fitted orbits from Tycho's readings (formal 1-sigma)", x, sig, x_true)
     call print_sigmas()
     call write_residuals(x, use)
-    write(*, '(A,755ES20.11)') ' FIT ', x
-    write(*, '(A,755ES20.11)') ' SIG ', sig
+    write(*, '(A,758ES20.11)') ' FIT ', x
+    write(*, '(A,758ES20.11)') ' SIG ', sig
     print '(/A)', ' Iterated extended Kalman filter (sequential updates, F = I, Q = 0), same readings and weights'
     sigma_prior = [0.05_dp, 0.05_dp, 0.05_dp, 0.5_dp, 0.5_dp, 1.0d-4, 1.0d7, &
                    0.05_dp, 0.05_dp, 0.05_dp, 0.5_dp, 0.5_dp, 1.0d-2, 4.0d4, 5.0_dp, 5.0_dp, 5.0_dp, &
@@ -2133,7 +2157,7 @@ program tycho_fit
                    5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, &
                    (5.0_dp, 5.0_dp, 0.1_dp, 0.3_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, ii_ = 1, 5), &
                    1.0_dp, 0.1_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, &
-                   (5.0_dp, ii_ = 1, 4*NMON), (1.0_dp, ii_ = 1, 2*NSTAR)]
+                   (5.0_dp, ii_ = 1, 4*NMON), (1.0_dp, ii_ = 1, 2*NSTAR), 5.0_dp, 5.0_dp, 5.0_dp]
     x = x0
     call fit_iekf(x, values, active, use, sigma_prior, 30, P)
     do k = 1, NP
@@ -2148,7 +2172,7 @@ program tycho_fit
     end do
     print '(A,F8.3,A,F12.2)', '   rms residual ', sqrt(rms/n), "'   chi2 ", r
     call report(' Iterated EKF result (1-sigma from the filter covariance)', x, sig, x_true)
-    write(*, '(A,755ES20.11)') ' EKF ', x
+    write(*, '(A,758ES20.11)') ' EKF ', x
 
   case ('profile')
     ! chi^2 as a function of the Earth-Sun distance a_E, all other
@@ -2274,6 +2298,8 @@ contains
         close(un)
         xb = 0.0_dp; xb(18:19) = 1.0_dp; xb(22:23) = 1.0_dp; xb(25) = 1.0_dp; xb(27:28) = 1.0_dp; call one_scales(xb)
         read(ln, *, iostat=ios) tag, xb
+        if (ios /= 0) read(ln, *, iostat=ios) tag, xb(1:757)
+        if (ios /= 0) read(ln, *, iostat=ios) tag, xb(1:755)
         if (ios /= 0) read(ln, *, iostat=ios) tag, xb(1:595)
         if (ios /= 0) read(ln, *, iostat=ios) tag, xb(1:345)
         if (ios /= 0) read(ln, *, iostat=ios) tag, xb(1:95)
@@ -2467,6 +2493,20 @@ contains
       use_dfar = .true.; param_on(90) = .true.
     end if
     if (index(arg, 'decns') > 0) dec_ns = .true.
+    if (index(arg, 'limbld') > 0) then
+      use_ld = .true.; param_on(IDL0 + 1:IDL0 + 2) = .true.
+    end if
+    ! "limbdark": only the shortfall on the dark side (the lit limbs keep the
+    ! Moon's fitted radius, irradiation included)
+    if (index(arg, 'limbdark') > 0 .and. index(arg, 'limbdarkns') == 0) then
+      use_ld = .true.; param_on(IDL0 + 2) = .true.
+    end if
+    if (index(arg, 'mra') > 0) then
+      use_mra = .true.; param_on(IDL0 + 3) = .true.
+    end if
+    if (index(arg, 'limbdarkns') > 0) then
+      use_ldns = .true.; param_on(IDL0 + 1:IDL0 + 2) = .true.
+    end if
     if (index(arg, 'tgroup') > 0) call set_time_groups()
     auto_sel = index(arg, 'auto') > 0
     if (index(arg, 'rdec') > 0) then
@@ -2633,8 +2673,8 @@ contains
       call report(" BLIND FIT (nothing from JPL; JPL column for comparison only)", xb, sgv, xt)
       call print_sigmas()
       call write_blind_residuals(xb, u, v)
-      write(*, '(A,755ES20.11)') ' BLIND ', xb
-      write(*, '(A,755ES20.11)') ' BLINDSIG ', sgv
+      write(*, '(A,758ES20.11)') ' BLIND ', xb
+      write(*, '(A,758ES20.11)') ' BLINDSIG ', sgv
       block
         integer :: un, g
         open(newunit=un, file='sigmas_out.dat', status='replace', action='write')
@@ -2801,7 +2841,7 @@ contains
                    5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, &
                    (5.0_dp, 5.0_dp, 0.1_dp, 0.3_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, ii_ = 1, 5), &
                    1.0_dp, 0.1_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, 5.0_dp, &
-                   (5.0_dp, ii_ = 1, 4*NMON), (1.0_dp, ii_ = 1, 2*NSTAR)]
+                   (5.0_dp, ii_ = 1, 4*NMON), (1.0_dp, ii_ = 1, 2*NSTAR), 5.0_dp, 5.0_dp, 5.0_dp]
         call fit_iekf(xp, v, act, u, sigma_prior, 30, P)
         call predict_all(xp, pr)
         rr = 0.0_dp
@@ -2813,7 +2853,7 @@ contains
         end do
         print '(A,F12.2,A,F12.2)', '   chi2 ', rr, '   (batch least squares ', last_chi2, ')'
         call report(' Iterated EKF from the 1586 solution (filter 1-sigma)', xp, sgv, xt)
-        write(*, '(A,755ES20.11)') ' BLINDEKF ', xp
+        write(*, '(A,758ES20.11)') ' BLINDEKF ', xp
       end block
     end block
   end subroutine
