@@ -270,6 +270,11 @@ module tycho_fit_mod
   ! fixed while the Jacobian is formed
   character(len=1) :: lchoice(MAXOBS) = 'C'
   logical :: fix_choice = .false.
+  ! choice_frozen: the limb choices held through a whole least-squares run
+  ! (fit_lm), decided again at its end; otherwise a choice that switches
+  ! (the lit-limb rule with the star near the line of the horns: near <->
+  ! far, a lunar diameter) is a cliff in chi2 that stops the fit at its edge
+  logical :: choice_frozen = .false., trace_choices = .false.
   real(dp) :: t_used(MAXOBS) = 0.0_dp ! moment each reading was predicted at (JD TT)
   integer :: nb_used = 8              ! bodies integrated (3 = Sun, Earth, Moon only)
   ! Elements 1-7 describe the Earth-Moon barycentre about the Sun (instead
@@ -1010,7 +1015,7 @@ contains
     end if
     cand = merge('NF', 'UL', o%point == 'n')
     o2 = o
-    if (fix_choice) then
+    if (fix_choice .or. choice_frozen) then
       o2%point = lchoice(i)
       p = predict_pt(o2, x, rsun, rmoon, vearth); return
     end if
@@ -1574,6 +1579,24 @@ contains
     end select
   end function
 
+  ! DIAGNOSTIC: data chi2 (weights and readings as they stand) + priors
+  function objective(x, values, use, active) result(c)
+    real(dp), intent(in) :: x(NP), values(nobs)
+    logical, intent(in) :: use(nobs), active(NP)
+    real(dp) :: c, p(nobs), uu
+    integer :: i, k
+    call predict_all(x, p)
+    c = 0.0_dp
+    do i = 1, nobs
+      if (use(i) .and. obs(i)%body /= 3) c = c + (dresid(obs(i), values(i), p(i))/sigma_g(obs(i)%group))**2
+    end do
+    do k = 1, NP
+      if (.not. (active(k) .and. param_on(k))) cycle
+      uu = prior_tau(k)
+      if (uu > 0.0_dp) c = c + (x(k)/uu)**2
+    end do
+  end function
+
   function fd_step(x, k) result(h)
     real(dp), intent(in) :: x(NP)
     integer, intent(in) :: k
@@ -1723,8 +1746,9 @@ contains
     real(dp), allocatable :: J(:,:), r(:)
     real(dp) :: N(NP,NP), g(NP), dx(NP), lam, chi2, chi2n, xn(NP), w, pn(nobs), rn(nobs), Ninv(NP,NP), e(NP)
     real(dp) :: wr(nobs), uu
-    integer :: it, k, i, na, idx(NP), m, nstall
+    integer :: it, k, i, na, idx(NP), m, nstall, pass, nflip
     logical :: ok
+    character(len=1) :: lc_prev(MAXOBS)
     allocate(J(nobs, NP), r(nobs))
     nstall = 0
     if (.not. freeze_use) use = .true.
@@ -1737,6 +1761,11 @@ contains
         na = na + 1; idx(na) = k
       end if
     end do
+    choice_frozen = .false.
+    call predict_all(x, pn)                  ! the limb choices at the start
+    choice_frozen = .true.
+    do pass = 1, 6
+    nstall = 0; lam = 1.0d-3
     do it = 1, 80
       call jacobian(x, values, J, r, active)
       call update_sigmas(r, use)
@@ -1841,6 +1870,16 @@ contains
       if (abs(chi2 - chi2n) < 1.0d-7*chi2) nstall = nstall + 1
       if (nstall >= 3 .and. it > 5) exit
     end do
+      ! the limb choices again at the solution; another run if any changed
+      lc_prev(1:nobs) = lchoice(1:nobs)
+      choice_frozen = .false.
+      call predict_all(x, pn)
+      choice_frozen = .true.
+      nflip = count(lchoice(1:nobs) /= lc_prev(1:nobs) .and. use(1:nobs))
+      if (nflip == 0) exit
+      if (verbose .or. trace_choices) print '(A,I2,A,I5,A)', '   limb choices: pass', pass, ',', nflip, ' changed; refitted'
+      if (pass == 6) lchoice(1:nobs) = lc_prev(1:nobs)   ! (cycling) the last run's
+    end do
     ! covariance of the active parameters: one factorization, a solve per
     ! column (the same arithmetic as factoring for every column)
     cov = 0.0_dp
@@ -1874,6 +1913,7 @@ contains
       if (use(i)) last_chi2 = last_chi2 + wr(i)*(dresid(obs(i), values(i), pn(i))/sigma_g(obs(i)%group))**2
     end do
     Ninv = 0.0_dp
+    choice_frozen = .false.
     deallocate(J, r)
   end subroutine
 
@@ -2889,6 +2929,42 @@ contains
           if (len_trim(arg) > 0 .and. trim(arg) /= 'all') xp(7) = xb(7)*PROFW(kk)
           call fit_lm(xp, v, actp, 4.0_dp, cv, u, rr, .false.)
           print '(F9.3,F16.1,F12.3,F10.3,F10.3,I7)', xp(7)/xb(7), xp(7), last_chi2, last_chi2 - chi0, rr, count(u)
+          block
+            ! DIAGNOSTIC (TYCHO_LINE): the objective on the straight line from
+            ! the blind solution to this profile point, limbs chosen anew at
+            ! each point and limbs held as at the blind solution
+            character(len=8) :: lv
+            integer :: st, jt
+            real(dp) :: xl(NP), c1, c2
+            call get_environment_variable('TYCHO_LINE', lv, status=st)
+            if (st == 0 .and. last_chi2 < chi0 - 1.0_dp) then
+              print '(A)', '     LINE  t   chi2(choices free)   chi2(choices of the solution)   [data + priors]'
+              do jt = 0, 20
+                xl = xb + (xp - xb)*jt/20.0_dp
+                call normalize_elements(xl)
+                c1 = objective(xl, v, u, actp)
+                xl = xb; c2 = objective(xl, v, u, actp)     ! sets the choices of the solution
+                xl = xb + (xp - xb)*jt/20.0_dp
+                call normalize_elements(xl)
+                fix_choice = .true.; c2 = objective(xl, v, u, actp); fix_choice = .false.
+                print '(A,F6.2,2F16.3)', '     LINE', jt/20.0_dp, c1, c2
+                if (jt == 1) then
+                  block
+                    character(len=1) :: lc0(MAXOBS)
+                    real(dp) :: pa(nobs), pb(nobs)
+                    integer :: i3
+                    xl = xb; call predict_all(xl, pa); lc0(1:nobs) = lchoice(1:nobs)
+                    xl = xb + (xp - xb)/20.0_dp; call normalize_elements(xl); call predict_all(xl, pb)
+                    do i3 = 1, nobs
+                      if (lchoice(i3) /= lc0(i3) .and. u(i3)) print '(A,A12,1X,A6,1X,A1,1X,A1,A,A1,2F10.2,A,F8.2)', &
+                          '     FLIP ', obs(i3)%id, obs(i3)%qty, obs(i3)%point, lc0(i3), ' -> ', lchoice(i3), &
+                          dresid(obs(i3), v(i3), pa(i3)), dresid(obs(i3), v(i3), pb(i3)), '  sigma', sigma_g(obs(i3)%group)
+                    end do
+                  end block
+                end if
+              end do
+            end if
+          end block
         end do
         sigma_g = sgf
         freeze_sigma = .false.; freeze_use = .false.
