@@ -100,6 +100,10 @@ module tycho_fit_mod
   ! (near if the other body lies on the sunward side, else far), as in 97 %
   ! of his named ones, not the limb that fits best
   logical :: lit_rule = .false.
+  ! "staraberr": the stars of the distances get the same annual aberration
+  ! (from the fitted Earth's velocity) as the Moon and the Sun; the
+  ! catalogue gives mean places
+  logical :: star_aberr = .false.
   ! x(26:29): 1594's altitude offset, Moon radius, refraction, latitude
   ! (peryear); x(30): 1594's declination offset
   ! x(43:87): one block of 9 for each further year (1587, 1588, 1590, 1591,
@@ -1098,6 +1102,17 @@ contains
     case ('DIST', 'RADIFF')
       if (trim(o%refkind) == 'STAR') then
         Hs = wrap180(o%last - o%sra); ds = o%sdec; sds = 0.0_dp
+        if (star_aberr .and. use_aberr) then
+          block
+            real(dp) :: us(3), ab(3)
+            us = [cos(ds*DEG2RAD)*cos(o%sra*DEG2RAD), cos(ds*DEG2RAD)*sin(o%sra*DEG2RAD), sin(ds*DEG2RAD)]
+            us = matmul(transpose(o%M), us)
+            ab = vearth/C_LIGHT_KMS
+            us = us + ab - us*dot_product(us, ab)
+            us = matmul(o%M, us)/norm2(us)
+            Hs = wrap180(o%last - atan2(us(2), us(1))*RAD2DEG); ds = asin(us(3))*RAD2DEG
+          end block
+        end if
         if (use_rstar .and. o%star > 0) then
           Hs = Hs - x(IST0 + 2*o%star - 1)/60.0_dp/max(cos(ds*DEG2RAD), 1.0d-6)
           ds = ds + x(IST0 + 2*o%star)/60.0_dp
@@ -2535,6 +2550,7 @@ contains
     end if
     if (index(arg, 'decns') > 0) dec_ns = .true.
     if (index(arg, 'litrule') > 0) lit_rule = .true.
+    if (index(arg, 'staraberr') > 0) star_aberr = .true.
     if (index(arg, 'limbld') > 0) then
       use_ld = .true.; param_on(IDL0 + 1:IDL0 + 2) = .true.
     end if
