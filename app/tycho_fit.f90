@@ -96,6 +96,11 @@ module tycho_fit_mod
   ! the last lit_sd was on the dark side; "nodarkdec" (subset) leaves out
   ! the declinations of limbs on the dark side
   logical :: decdark(MAXOBS) = .false., lsd_dark = .false.
+  ! the star's angle from the Moon's line of the horns (deg) for a distance
+  ! whose limb Tycho did not name, from the model's own Sun; "nohorns"
+  ! (subset) leaves out those within 20 deg, where the lit limb is not
+  ! defined and the limb read flips between near and far
+  real(dp) :: hornang(MAXOBS) = 90.0_dp, lsd_ct = 1.0_dp
   ! "litrule": a distance to a limb Tycho did not name is to the lit limb
   ! (near if the other body lies on the sunward side, else far), as in 97 %
   ! of his named ones, not the limb that fits best
@@ -305,7 +310,7 @@ module tycho_fit_mod
 
   ! OpenMP: what a prediction writes as scratch is private to each thread
   !$omp threadprivate(lat_deg, ref_scale, h_scale, ld_lit, ld_dark, coslat_rho, sinlat_rho, cur_i, alt_read, ha_read, &
-  !$omp&   decdark, lsd_dark, &
+  !$omp&   decdark, hornang, lsd_dark, lsd_ct, &
   !$omp&   star_dp, farlimb, elong, t_used, c_pos, c_vel, c_key)
 
 contains
@@ -783,6 +788,7 @@ contains
     end select
     call sky_dir(H, d, Hs, ds, se, sn)
     ct = ue*se + un*sn
+    lsd_ct = ct
     if (ct >= 0.0_dp) then                   ! the lit side: the limb itself
       if (use_ld .and. .not. use_ldns) sdl = sd + ld_lit/60.0_dp
       return
@@ -1020,6 +1026,7 @@ contains
       p = predict_pt(o2, x, rsun, rmoon, vearth); return
     end if
     o2%point = cand(1:1); p1 = predict_pt(o2, x, rsun, rmoon, vearth); dark1 = lsd_dark
+    if (o%point == 'n' .and. i > 0) hornang(i) = abs(90.0_dp - acos(max(-1.0_dp, min(1.0_dp, lsd_ct)))*RAD2DEG)
     o2%point = cand(2:2); p2 = predict_pt(o2, x, rsun, rmoon, vearth); dark2 = lsd_dark
     if (lit_rule .and. o%point == 'n' .and. dark1 .neqv. dark2) then
       if (.not. dark1) then
@@ -2683,7 +2690,7 @@ contains
     !   give the time (all Sun readings kept)
     call get_arg(12, arg)
     call quarter_table(xb)
-    if (index(arg, 'nodarkdec') > 0) then
+    if (index(arg, 'nodarkdec') > 0 .or. index(arg, 'nohorns') > 0) then
       ! which limbs are on the dark side, from the model's own Sun
       block
         real(dp), allocatable :: ptmp(:)
@@ -2920,6 +2927,98 @@ contains
         sgf = sigma_g; chi0 = last_chi2
         freeze_sigma = .true.; freeze_use = .true.
         actp = .true.; actp(7) = .false.
+        ! SCAN (TYCHO_SCAN): chi2 with a_E held at each value of a wide grid,
+        ! from Tycho's 1150 Earth radii to 300 M km, everything else refitted
+        ! (weights, readings and the random effects' spreads as in the fit).
+        ! Each point from several starts -- chained from its neighbour going
+        ! outward from the solution, from the solution itself, and again from
+        ! the better neighbour -- the lowest objective kept.
+        block
+          character(len=8) :: sv
+          integer :: st, j, j0, dir, jj, pass2
+          integer, parameter :: NGR = 25
+          real(dp), parameter :: GRID(NGR) = [7.335_dp, 10.0_dp, 15.0_dp, 20.0_dp, 30.0_dp, 40.0_dp, &
+              50.0_dp, 60.0_dp, 70.0_dp, 80.0_dp, 90.0_dp, 100.0_dp, 110.0_dp, 120.0_dp, 130.0_dp, &
+              140.0_dp, 150.0_dp, 160.0_dp, 170.0_dp, 180.0_dp, 200.0_dp, 225.0_dp, 250.0_dp, 275.0_dp, 300.0_dp]
+          real(dp) :: xs(NP, NGR), cs(NGR), cdat(NGR), rs(NGR), xa(NP), ca, xprev(NP), c0, cmin
+          integer :: win(NGR)
+          character(len=*), parameter :: WN(4) = [character(len=10) :: 'chain', 'solution', 'neighbour', '-']
+          call get_environment_variable('TYCHO_SCAN', sv, status=st)
+          if (st == 0 .and. len_trim(sv) > 0) then
+            c0 = objective(xb, v, u, actp)
+            print '(/A,F14.1,A,F12.3)', '   SCAN of a_E (all else refitted); the fit: a_E ', xb(7), ' km, objective ', c0
+            j0 = minloc(abs(GRID*1.0d6 - xb(7)), 1)
+            cs = huge(1.0_dp); win = 4
+            do dir = -1, 1, 2
+              xprev = xb
+              j = j0; if (dir == 1) j = j0 + 1
+              do while (j >= 1 .and. j <= NGR)
+                xa = xprev; xa(7) = GRID(j)*1.0d6; sigma_g = sgf
+                call fit_lm(xa, v, actp, 4.0_dp, cv, u, rr, .false.)
+                ca = objective(xa, v, u, actp)
+                if (ca < cs(j)) then
+                  cs(j) = ca; xs(:, j) = xa; cdat(j) = last_chi2; rs(j) = rr; win(j) = 1
+                end if
+                print '(A,F8.2,A,F12.3)', '     SCANPT chain     ', GRID(j), ' M km  objective ', ca
+                xprev = xa; j = j + dir
+              end do
+            end do
+            do j = 1, NGR
+              xa = xb; xa(7) = GRID(j)*1.0d6; sigma_g = sgf
+              call fit_lm(xa, v, actp, 4.0_dp, cv, u, rr, .false.)
+              ca = objective(xa, v, u, actp)
+              print '(A,F8.2,A,F12.3)', '     SCANPT solution  ', GRID(j), ' M km  objective ', ca
+              if (ca < cs(j)) then
+                cs(j) = ca; xs(:, j) = xa; cdat(j) = last_chi2; rs(j) = rr; win(j) = 2
+              end if
+            end do
+            do pass2 = 1, 2
+              do j = 1, NGR
+                do jj = j - 1, j + 1, 2
+                  if (jj < 1 .or. jj > NGR) cycle
+                  xa = xs(:, jj); xa(7) = GRID(j)*1.0d6; sigma_g = sgf
+                  call fit_lm(xa, v, actp, 4.0_dp, cv, u, rr, .false.)
+                  ca = objective(xa, v, u, actp)
+                  if (ca < cs(j) - 1.0d-6) then
+                    print '(A,F8.2,A,F12.3,A,F12.3)', '     SCANPT neighbour ', GRID(j), ' M km  objective ', ca, &
+                        '  (was ', cs(j), ')'
+                    cs(j) = ca; xs(:, j) = xa; cdat(j) = last_chi2; rs(j) = rr; win(j) = 3
+                  end if
+                end do
+              end do
+            end do
+            cmin = minval(cs)
+            print '(/A)', '   SCAN  a_E (M km)   objective   - minimum   - the fit   data chi2   rms(arcmin)   best start'
+            do j = 1, NGR
+              print '(A,F9.2,F14.3,2F12.3,F12.3,F12.4,3X,A)', '   SCAN ', GRID(j), cs(j), cs(j) - cmin, cs(j) - c0, &
+                  cdat(j), rs(j), trim(WN(win(j)))
+            end do
+            ! every reading's normalized residual at every grid point (limb
+            ! choices made at that point), to find what jumps between points
+            block
+              real(dp), allocatable :: pr2(:,:)
+              integer :: un3, i3
+              allocate(pr2(nobs, NGR))
+              sigma_g = sgf
+              do j = 1, NGR
+                call predict_all(xs(:, j), pr2(:, j))
+                do i3 = 1, nobs
+                  pr2(i3, j) = dresid(obs(i3), v(i3), pr2(i3, j))
+                end do
+              end do
+              open(newunit=un3, file='scan_resid.dat', status='replace', action='write')
+              write(un3, '(A,25F9.2)') '# id qty point used lchoice sigma | resid (arcmin) at a_E (M km):', GRID
+              do i3 = 1, nobs
+                write(un3, '(A12,1X,A6,1X,A1,L2,1X,A1,F8.3,25F10.3)') obs(i3)%id, obs(i3)%qty, obs(i3)%point, u(i3), &
+                    lchoice(i3), sigma_g(obs(i3)%group), pr2(i3, :)
+              end do
+              close(un3)
+            end block
+            sigma_g = sgf
+            freeze_sigma = .false.; freeze_use = .false.
+            return
+          end if
+        end block
         print '(/A)', '   chi2 against a_E (all else refitted; weights of the blind fit)'
         print '(A)', '     a_E/fit      a_E (km)        chi2     dchi2    rms(arcmin)'
         do kk = 1, 11
@@ -3083,6 +3182,14 @@ contains
           elong(j) > 70.0_dp .and. elong(j) < 290.0_dp
       if (index(name, 'nodarkdec') > 0 .and. obs(j)%body == 2 .and. trim(obs(j)%qty) == 'DEC') &
           keep(j) = keep(j) .and. .not. decdark(j)
+      if (index(name, 'nohorns') > 0 .and. obs(j)%body == 2 .and. trim(obs(j)%qty) == 'DIST' .and. &
+          obs(j)%point == 'n' .and. trim(obs(j)%refkind) == 'STAR') then
+        if (hornang(j) < 45.0_dp) print '(A,A,F7.2)', '   nohorns (check): ', trim(obs(j)%id), hornang(j)
+        if (hornang(j) < 20.0_dp) then
+          keep(j) = .false.
+          print '(A,A,A,F6.1,A)', '   nohorns: ', trim(obs(j)%id), ' left out (star ', hornang(j), ' deg from the horns)'
+        end if
+      end if
       if (index(name, 'old1586') > 0) keep(j) = keep(j) .and. &
           .not. (obs(j)%id(1:5) == 'm86c:' .or. obs(j)%id(1:5) == 'm86d:')
     end do
