@@ -2690,7 +2690,7 @@ contains
     !   give the time (all Sun readings kept)
     call get_arg(12, arg)
     call quarter_table(xb)
-    if (index(arg, 'nodarkdec') > 0 .or. index(arg, 'nohorns') > 0) then
+    if (index(arg, 'nodarkdec') > 0 .or. index(arg, 'nohorns') > 0 .or. index(arg, 'nofar') > 0) then
       ! which limbs are on the dark side, from the model's own Sun
       block
         real(dp), allocatable :: ptmp(:)
@@ -2972,7 +2972,7 @@ contains
                 cs(j) = ca; xs(:, j) = xa; cdat(j) = last_chi2; rs(j) = rr; win(j) = 2
               end if
             end do
-            do pass2 = 1, 2
+            do pass2 = 1, merge(0, 2, trim(sv) == 'fast')   ! fast: no restarts from the neighbours
               do j = 1, NGR
                 do jj = j - 1, j + 1, 2
                   if (jj < 1 .or. jj > NGR) cycle
@@ -3184,6 +3184,12 @@ contains
           elong(j) > 70.0_dp .and. elong(j) < 290.0_dp
       if (index(name, 'nodarkdec') > 0 .and. obs(j)%body == 2 .and. trim(obs(j)%qty) == 'DEC') &
           keep(j) = keep(j) .and. .not. decdark(j)
+      ! nofar: no Moon-star distances to the far limb (the star on the dark
+      ! side, the distance read across the disk to the lit limb), from the
+      ! model's own geometry: their excess goes with waxing and waning as the
+      ! parallactic inequality does, and cannot be told from it
+      if (index(name, 'nofar') > 0 .and. obs(j)%body == 2 .and. trim(obs(j)%qty) == 'DIST' .and. &
+          trim(obs(j)%refkind) == 'STAR' .and. farlimb(j)) keep(j) = .false.
       if (index(name, 'nohorns') > 0 .and. obs(j)%body == 2 .and. trim(obs(j)%qty) == 'DIST' .and. &
           obs(j)%point == 'n' .and. trim(obs(j)%refkind) == 'STAR') then
         if (hornang(j) < 45.0_dp) print '(A,A,F7.2)', '   nohorns (check): ', trim(obs(j)%id), hornang(j)
