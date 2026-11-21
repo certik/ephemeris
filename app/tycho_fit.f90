@@ -96,6 +96,10 @@ module tycho_fit_mod
   ! the last lit_sd was on the dark side; "nodarkdec" (subset) leaves out
   ! the declinations of limbs on the dark side
   logical :: decdark(MAXOBS) = .false., lsd_dark = .false.
+  ! "litrule": a distance to a limb Tycho did not name is to the lit limb
+  ! (near if the other body lies on the sunward side, else far), as in 97 %
+  ! of his named ones, not the limb that fits best
+  logical :: lit_rule = .false.
   ! x(26:29): 1594's altitude offset, Moon radius, refraction, latitude
   ! (peryear); x(30): 1594's declination offset
   ! x(43:87): one block of 9 for each further year (1587, 1588, 1590, 1591,
@@ -144,7 +148,7 @@ module tycho_fit_mod
   ! mode "alien": the procedure of data/fit/ALIEN_PROCEDURE.md, its choices
   ! fixed here (arguments 7 and 9-12 are not read)
   logical :: alien = .false.
-  character(len=*), parameter :: ALIEN_MODEL = 'tycho+aberr,moonr,refr,lat,phase,nosunpar,decns,tgroup,rdec,ralt,rdist,rfar'
+  character(len=*), parameter :: ALIEN_MODEL = 'tycho+aberr,moonr,refr,lat,phase,nosunpar,decns,litrule,tgroup,rdec,ralt,rdist,rfar'
   character(len=*), parameter :: ALIEN_SUBSET = 'moonstar+nodarkdec'
   real(dp), parameter :: ALIEN_GAP = 5.0_dp
   ! random effects ("rdec", "ralt", "rdist", "rfar"): the campaigns' values
@@ -996,6 +1000,7 @@ contains
     real(dp) :: p, p1, p2
     type(reading) :: o2
     character(len=2) :: cand
+    logical :: dark1, dark2
     if (o%point /= 'n' .and. o%point /= 'v') then
       p = predict_pt(o, x, rsun, rmoon, vearth); return
     end if
@@ -1005,8 +1010,16 @@ contains
       o2%point = lchoice(i)
       p = predict_pt(o2, x, rsun, rmoon, vearth); return
     end if
-    o2%point = cand(1:1); p1 = predict_pt(o2, x, rsun, rmoon, vearth)
-    o2%point = cand(2:2); p2 = predict_pt(o2, x, rsun, rmoon, vearth)
+    o2%point = cand(1:1); p1 = predict_pt(o2, x, rsun, rmoon, vearth); dark1 = lsd_dark
+    o2%point = cand(2:2); p2 = predict_pt(o2, x, rsun, rmoon, vearth); dark2 = lsd_dark
+    if (lit_rule .and. o%point == 'n' .and. dark1 .neqv. dark2) then
+      if (.not. dark1) then
+        p = p1; lchoice(i) = cand(1:1)
+      else
+        p = p2; lchoice(i) = cand(2:2)
+      end if
+      return
+    end if
     if (abs(dresid(o, o%value, p1)) <= abs(dresid(o, o%value, p2))) then
       p = p1; lchoice(i) = cand(1:1)
     else
@@ -1113,8 +1126,17 @@ contains
         end if
         if (use_mdist .and. o%body == 2) p = p + x(95 + 2*NMON + o%win)/60.0_dp
         select case (o%point)
-        case ('N'); p = p - lit_sd('N', H, d, sd, Hsun, dsun, Hs, ds)
-        case ('F'); p = p + lit_sd('F', H, d, sd, Hsun, dsun, Hs, ds)
+        case ('N')
+          p = p - lit_sd('N', H, d, sd, Hsun, dsun, Hs, ds)
+          if (use_dnear) p = p + x(91)/60.0_dp
+          if (cur_i > 0) farlimb(cur_i) = .false.
+        case ('F')
+          ! a distance to a limb not named, taken as the far one: the same
+          ! far-limb excess as a named far limb
+          p = p + lit_sd('F', H, d, sd, Hsun, dsun, Hs, ds)
+          if (use_dfar) p = p + x(90)/60.0_dp
+          if (cur_i > 0) farlimb(cur_i) = .true.
+          if (use_mfar .and. o%body == 2) p = p + x(95 + 3*NMON + o%win)/60.0_dp
         case ('U', 'L', 'E', 'W')
           if (side(Hc, dc, Ho, dov, o%point) > 0.0_dp) then
             p = p - msd(o%point)
@@ -2512,6 +2534,7 @@ contains
       use_dfar = .true.; param_on(90) = .true.
     end if
     if (index(arg, 'decns') > 0) dec_ns = .true.
+    if (index(arg, 'litrule') > 0) lit_rule = .true.
     if (index(arg, 'limbld') > 0) then
       use_ld = .true.; param_on(IDL0 + 1:IDL0 + 2) = .true.
     end if
