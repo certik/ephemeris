@@ -157,8 +157,8 @@ module tycho_fit_mod
   ! mode "alien": the procedure of data/fit/ALIEN_PROCEDURE.md, its choices
   ! fixed here (arguments 7 and 9-12 are not read)
   logical :: alien = .false.
-  character(len=*), parameter :: ALIEN_MODEL = 'tycho+aberr,moonr,refr,lat,phase,nosunpar,decns,litrule,tgroup,rdec,ralt,rdist,rfar'
-  character(len=*), parameter :: ALIEN_SUBSET = 'moonstar+nodarkdec'
+  character(len=*), parameter :: ALIEN_MODEL = 'tycho+aberr,moonr,refr,lat,phase,nosunpar,decns,litrule,tgroup,staraberr,rdec,ralt,rdist'
+  character(len=*), parameter :: ALIEN_SUBSET = 'moonstar+nodarkdec+nohorns+nofar'
   real(dp), parameter :: ALIEN_GAP = 5.0_dp
   ! random effects ("rdec", "ralt", "rdist", "rfar"): the campaigns' values
   ! of a correction scatter about its mean (the year's offset; for the far
