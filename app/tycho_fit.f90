@@ -3177,6 +3177,8 @@ contains
           obs(j)%point == 'U') keep(j) = .false.
       if (obs(j)%body == 2 .and. index(name, 'nowdist') > 0 .and. trim(obs(j)%qty) == 'DIST' .and. &
           obs(j)%point == 'W') keep(j) = .false.
+      if (obs(j)%body == 2 .and. index(name, 'noedist') > 0 .and. trim(obs(j)%qty) == 'DIST' .and. &
+          obs(j)%point == 'E') keep(j) = .false.
       ! nocres: no Moon readings at a crescent (within 70 deg of the Sun)
       if (index(name, 'nocres') > 0 .and. obs(j)%body == 2) keep(j) = keep(j) .and. &
           elong(j) > 70.0_dp .and. elong(j) < 290.0_dp
