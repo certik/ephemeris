@@ -1723,10 +1723,13 @@ contains
         end do
       end do
       !$omp end parallel do
-      ! random effects: a campaign's value is drawn about zero with spread tau
+      ! random effects: a campaign's value is drawn about zero with spread
+      ! tau -- for every such parameter, with or without readings now (one
+      ! that lost its readings to the clipping goes back to zero), and the
+      ! same in the chi2 of the trial steps below
       do k = 1, na
         uu = prior_tau(idx(k))
-        if (uu > 0.0_dp .and. N(idx(k), idx(k)) > 0.0_dp) then
+        if (uu > 0.0_dp) then
           N(idx(k), idx(k)) = N(idx(k), idx(k)) + 1.0_dp/uu**2
           g(idx(k)) = g(idx(k)) - x(idx(k))/uu**2
           chi2 = chi2 + (x(idx(k))/uu)**2
@@ -1767,7 +1770,7 @@ contains
         end do
         do k = 1, na
           uu = prior_tau(idx(k))
-          if (uu > 0.0_dp .and. xn(idx(k)) /= 0.0_dp) chi2n = chi2n + (xn(idx(k))/uu)**2
+          if (uu > 0.0_dp) chi2n = chi2n + (xn(idx(k))/uu)**2
         end do
         if (ok .and. chi2n < chi2) then
           lam = max(lam/5.0_dp, 1.0d-9); exit
